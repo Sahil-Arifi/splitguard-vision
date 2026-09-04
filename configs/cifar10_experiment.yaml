@@ -1,0 +1,26 @@
+data:
+  data_dir: .splitguard-data/cifar10
+  download: true
+  num_classes: 10
+  train_per_class: 300
+  validation_per_class: 50
+  test_per_class: 100
+  contamination_per_class: 20
+  sampling_seed: 314159
+  contamination: resize
+
+repair:
+  split_size_weight: 1.0
+  class_balance_weight: 1.0
+  seed: 271828
+  local_iterations: 250
+
+training:
+  seeds: [7, 42, 101]
+  epochs: 3
+  batch_size: 128
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  device: auto
+  num_workers: 0
+  augmentation: none

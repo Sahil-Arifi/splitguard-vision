@@ -6,14 +6,17 @@ import csv
 import hashlib
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Never
 
+import numpy as np
 import pytest
+from click import unstyle
 from PIL import Image
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 import splitguard.cli as cli_module
+import splitguard.training as training_module
 from splitguard.benchmark import load_benchmark_config
 from splitguard.cli import app
 from splitguard.config import load_config
@@ -24,8 +27,13 @@ from splitguard.schemas import (
     RepairArtifact,
     ScalingBenchmarkArtifact,
     Split,
+    TrainingArtifact,
+    TrainingCondition,
+    canonical_json,
     canonical_sha256,
 )
+from splitguard.training import CifarExperimentConfig
+from splitguard.training import run_cifar_experiment as run_cifar_experiment_core
 
 runner = CliRunner()
 
@@ -37,6 +45,7 @@ def test_root_help_is_useful() -> None:
     assert "Audit and repair image dataset split leakage" in result.stdout
     assert "benchmark-detection" in result.stdout
     assert "benchmark-scale" in result.stdout
+    assert "experiment" in result.stdout
     assert "version" in result.stdout
     assert "repair" in result.stdout
     assert "materialize" in result.stdout
@@ -88,11 +97,12 @@ def test_benchmark_commands_have_useful_help() -> None:
         ("benchmark-scale", "synthetic neighbor scaling"),
     ):
         result = runner.invoke(app, [command, "--help"])
+        output = unstyle(result.stdout)
 
         assert result.exit_code == 0
-        assert purpose in result.stdout
-        assert "--config" in result.stdout
-        assert "--output" in result.stdout
+        assert purpose in output
+        assert "--config" in output
+        assert "--output" in output
 
 
 def test_benchmark_detection_runs_offline_fake_backend_and_serializes(
@@ -229,6 +239,219 @@ def test_benchmark_config_errors_are_private_and_leave_no_partial_output(
     assert "validation" in result.output
     assert "Traceback" not in result.output
     assert str(tmp_path) not in result.output
+    assert not output.exists()
+
+
+def _write_small_experiment_config(path: Path) -> Path:
+    path.write_text(
+        """\
+data:
+  data_dir: private/cifar
+  download: true
+  num_classes: 2
+  train_per_class: 2
+  validation_per_class: 1
+  test_per_class: 1
+  contamination_per_class: 1
+  sampling_seed: 19
+  contamination: resize
+repair:
+  split_size_weight: 1.0
+  class_balance_weight: 1.0
+  seed: 23
+  local_iterations: 10
+training:
+  seeds: [3]
+  epochs: 1
+  batch_size: 2
+  learning_rate: 0.001
+  weight_decay: 0.0
+  device: cpu
+  num_workers: 0
+  augmentation: none
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _generated_cifar_arrays() -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    rng = np.random.default_rng(20260903)
+    training_images: list[np.ndarray] = []
+    training_labels: list[int] = []
+    test_images: list[np.ndarray] = []
+    test_labels: list[int] = []
+    for class_id in range(2):
+        for _ in range(4):
+            image = rng.integers(0, 256, size=(32, 32, 3), dtype=np.uint8)
+            image[:, :, class_id] = np.clip(
+                image[:, :, class_id].astype(np.int16) + 40,
+                0,
+                255,
+            ).astype(np.uint8)
+            training_images.append(image)
+            training_labels.append(class_id)
+        for _ in range(2):
+            test_images.append(
+                rng.integers(0, 256, size=(32, 32, 3), dtype=np.uint8)
+            )
+            test_labels.append(class_id)
+    return (
+        np.stack(training_images),
+        np.asarray(training_labels, dtype=np.int64),
+        np.stack(test_images),
+        np.asarray(test_labels, dtype=np.int64),
+    )
+
+
+def test_experiment_help_names_config_and_raw_artifact_defaults() -> None:
+    result = runner.invoke(app, ["experiment", "--help"])
+    output = unstyle(result.stdout)
+
+    assert result.exit_code == 0
+    assert "matched contaminated and repaired" in output
+    assert "--config" in output
+    assert "cifar10_experiment.yaml" in output
+    assert "--output" in output
+    assert "training_results.json" in output
+
+
+def test_experiment_runs_generated_arrays_without_cifar_download(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    config_path = _write_small_experiment_config(tmp_path / "experiment.yaml")
+    output = tmp_path / "private-results" / "training.json"
+    expected_config = CifarExperimentConfig.from_yaml(config_path)
+    returned: list[TrainingArtifact] = []
+    calls: list[tuple[CifarExperimentConfig, Path, Path]] = []
+
+    def fail_if_cifar_loader_runs(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("the CLI test must not load or download CIFAR-10")
+
+    def run_generated(
+        config: CifarExperimentConfig,
+        *,
+        project_root: str | Path | None = None,
+        repo_root: str | Path | None = None,
+    ) -> TrainingArtifact:
+        assert project_root is not None
+        assert repo_root is not None
+        calls.append((config, Path(project_root), Path(repo_root)))
+        artifact = run_cifar_experiment_core(
+            config,
+            source_arrays=_generated_cifar_arrays(),
+            project_root=project_root,
+            repo_root=repo_root,
+        )
+        returned.append(artifact)
+        return artifact
+
+    monkeypatch.setattr(training_module, "load_cifar10_arrays", fail_if_cifar_loader_runs)
+    monkeypatch.setattr(cli_module, "run_cifar_experiment", run_generated)
+
+    result = runner.invoke(
+        app,
+        ["experiment", "--config", str(config_path), "--output", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    artifact = TrainingArtifact.model_validate_json(output.read_bytes())
+    assert len(calls) == 1
+    assert calls[0][0] == expected_config
+    assert calls[0][0].data.download is True
+    assert len(returned) == 1
+    assert artifact.metadata == returned[0].metadata
+    assert artifact.metadata.configuration_sha256 == expected_config.config_hash
+    assert artifact.metadata.random_seeds == (3,)
+    assert artifact.metadata.git_commit_sha is not None
+    assert artifact.summary.dataset_source == "provided_arrays"
+    assert artifact.summary.injected_family_count == 2
+    assert artifact.summary.resolved_device == "cpu"
+    assert artifact.summary.repair_summary.hard_group_invariant_satisfied is True
+    assert tuple(run.condition for run in artifact.runs) == (
+        TrainingCondition.CONTAMINATED,
+        TrainingCondition.REPAIRED,
+    )
+    assert all(run.test_accuracy.total > 0 for run in artifact.runs)
+    assert output.read_text(encoding="utf-8") == canonical_json(artifact) + "\n"
+
+    success = json.loads(result.stdout)
+    assert success["artifact"] == output.name
+    assert success["configuration_sha256"] == artifact.metadata.configuration_sha256
+    assert success["dataset_manifest_sha256"] == artifact.metadata.dataset_manifest_sha256
+    assert success["dataset_source"] == "provided_arrays"
+    assert success["injected_family_count"] == 2
+    assert success["repair_hard_group_invariant_satisfied"] is True
+    assert success["resolved_device"] == "cpu"
+    assert success["run_count"] == 2
+    assert success["seeds"] == [3]
+    assert [row["condition"] for row in success["results"]] == [
+        "contaminated",
+        "repaired",
+    ]
+    assert [row["split_manifest_sha256"] for row in success["results"]] == [
+        run.split_manifest_sha256 for run in artifact.runs
+    ]
+    assert all("shared_clean_holdout_accuracy" in row for row in success["results"])
+    assert all("non_injected_test_accuracy" in row for row in success["results"])
+    assert "inflates" not in result.stdout
+    assert str(tmp_path) not in result.stdout
+    assert str(tmp_path) not in output.read_text(encoding="utf-8")
+    assert not tuple(output.parent.glob("*.tmp"))
+
+
+def test_experiment_rejects_invalid_config_without_partial_output(tmp_path: Path) -> None:
+    config_path = tmp_path / "private" / "invalid-experiment.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        f"unknown_private_path: {tmp_path.as_posix()}\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "results" / "training.json"
+
+    result = runner.invoke(
+        app,
+        ["experiment", "--config", str(config_path), "--output", str(output)],
+    )
+
+    assert result.exit_code == 2
+    assert "experiment configuration failed" in result.output
+    assert "validation" in result.output
+    assert "Traceback" not in result.output
+    assert str(tmp_path) not in result.output
+    assert not output.exists()
+
+
+def test_experiment_hides_runtime_paths_and_leaves_no_partial_output(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    config_path = _write_small_experiment_config(tmp_path / "experiment.yaml")
+    output = tmp_path / "results" / "training.json"
+
+    def fail_with_private_path(*_args: object, **_kwargs: object) -> Never:
+        raise RuntimeError(f"failed near {tmp_path}")
+
+    monkeypatch.setattr(cli_module, "run_cifar_experiment", fail_with_private_path)
+
+    result = runner.invoke(
+        app,
+        ["experiment", "--config", str(config_path), "--output", str(output)],
+    )
+    rendered = unstyle(result.output)
+
+    assert result.exit_code == 2
+    assert "experiment failed" in rendered
+    assert "training artifact" in rendered
+    assert "published" in rendered
+    assert "Traceback" not in rendered
+    assert str(tmp_path) not in rendered
     assert not output.exists()
 
 

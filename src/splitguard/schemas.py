@@ -315,9 +315,7 @@ class LeakageGroup(StrictFrozenModel):
     splits: Annotated[tuple[Split, ...], Field(min_length=2)]
     boundaries: Annotated[tuple[SplitBoundary, ...], Field(min_length=1)]
     labels: tuple[str, ...] = ()
-    evidence_types: Annotated[
-        tuple[DuplicateClassification, ...], Field(min_length=1)
-    ]
+    evidence_types: Annotated[tuple[DuplicateClassification, ...], Field(min_length=1)]
     strongest_evidence: DuplicateClassification
     label_conflict: bool
 
@@ -483,17 +481,13 @@ class RepairArtifact(StrictFrozenModel):
     artifact_type: Literal["repair"] = "repair"
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     metadata: RunMetadata
-    requested_ratios: Annotated[
-        tuple[SplitRatio, ...], Field(min_length=3, max_length=3)
-    ]
+    requested_ratios: Annotated[tuple[SplitRatio, ...], Field(min_length=3, max_length=3)]
     integer_targets: Annotated[
         tuple[tuple[Split, NonNegativeInt], ...], Field(min_length=3, max_length=3)
     ]
     assignments: tuple[RepairAssignment, ...]
     excluded_invalid_ids: tuple[StableId, ...] = ()
-    infeasibility_warnings: tuple[
-        Annotated[str, Field(min_length=1, max_length=1000)], ...
-    ] = ()
+    infeasibility_warnings: tuple[Annotated[str, Field(min_length=1, max_length=1000)], ...] = ()
     split_size_weight: NonNegativeFloat
     class_balance_weight: NonNegativeFloat
     random_seed: Annotated[int, Field(ge=0)]
@@ -615,9 +609,10 @@ class EmbeddingProvenance(StrictFrozenModel):
         elif self.backend == "dinov2":
             if self.is_synthetic:
                 raise ValueError("DINOv2 provenance cannot be labeled synthetic")
-            if self.model_revision is None or _IMMUTABLE_REVISION_RE.fullmatch(
-                self.model_revision
-            ) is None:
+            if (
+                self.model_revision is None
+                or _IMMUTABLE_REVISION_RE.fullmatch(self.model_revision) is None
+            ):
                 raise ValueError("DINOv2 provenance requires an immutable revision")
             if not self.model_identity.startswith("huggingface:") or (
                 f"@{self.model_revision}" not in self.model_identity
@@ -706,16 +701,184 @@ class NamedAccuracy(StrictFrozenModel):
     metric: AccuracyMetric
 
 
-class TrainingRun(StrictFrozenModel):
-    seed: int
+class TrainingContaminationGroundTruth(StrictFrozenModel):
+    """Detector-independent provenance for one injected train/test family."""
+
+    source_record_id: StableId
+    derived_record_id: StableId
+    source_train_position: NonNegativeInt
+    contaminated_test_position: NonNegativeInt
+    label: NonNegativeInt
+    corruption: Literal["resize", "jpeg"]
+    expected_relationship: Literal["transformed_duplicate"] = "transformed_duplicate"
+    repair_requires_same_split: Literal[True] = True
+    source_split: Literal["train"] = "train"
+    contaminated_split: Literal["test"] = "test"
+    source_sha256: Sha256
+    derived_sha256: Sha256
+
+    @model_validator(mode="after")
+    def describes_a_materially_transformed_pair(self) -> Self:
+        if self.source_record_id == self.derived_record_id:
+            raise ValueError("source and derived record IDs must differ")
+        if self.source_sha256 == self.derived_sha256:
+            raise ValueError("a transformed duplicate must differ from its source")
+        return self
+
+
+class TrainingConditionSummary(StrictFrozenModel):
+    """Immutable split and evaluation-cohort counts for one condition."""
+
     condition: TrainingCondition
+    split_manifest_sha256: Sha256
+    train_image_count: Annotated[int, Field(gt=0)]
+    validation_image_count: Annotated[int, Field(gt=0)]
+    test_image_count: Annotated[int, Field(gt=0)]
+    injected_derivative_test_count: NonNegativeInt
+    non_injected_test_count: Annotated[int, Field(gt=0)]
+
+    @model_validator(mode="after")
+    def test_cohorts_partition_the_test_split(self) -> Self:
+        if (
+            self.injected_derivative_test_count + self.non_injected_test_count
+            != self.test_image_count
+        ):
+            raise ValueError("injected and non-injected cohorts must partition the test split")
+        return self
+
+
+class TrainingExperimentSummary(StrictFrozenModel):
+    """Auditable design, ground truth, and repair evidence for a training experiment."""
+
+    dataset_name: Literal["CIFAR-10"] = "CIFAR-10"
+    dataset_source: Literal["torchvision", "provided_arrays"]
+    num_classes: Annotated[int, Field(ge=2, le=100)]
+    corruption: Literal["resize", "jpeg"]
+    injected_family_count: Annotated[int, Field(gt=0)]
+    baseline_native_duplicate_count: Literal[0] = 0
+    sampling_seed: Annotated[int, Field(ge=0, le=2**32 - 1)]
+    repair_seed: Annotated[int, Field(ge=0, le=2**32 - 1)]
+    training_seeds: Annotated[tuple[int, ...], Field(min_length=1)]
+    requested_device: Literal["auto", "cpu", "cuda"]
+    resolved_device: Literal["cpu", "cuda"]
+    ground_truth: Annotated[tuple[TrainingContaminationGroundTruth, ...], Field(min_length=1)]
+    ground_truth_sha256: Sha256
+    repair_plan_sha256: Sha256
+    shared_clean_holdout_sha256: Sha256
+    shared_clean_holdout_count: Annotated[int, Field(gt=0)]
+    condition_summaries: Annotated[
+        tuple[TrainingConditionSummary, ...], Field(min_length=2, max_length=2)
+    ]
+    repair_summary: RepairSummary
+    repair_split_size_weight: NonNegativeFloat
+    repair_class_balance_weight: NonNegativeFloat
+    repair_local_iterations: NonNegativeInt
+    repair_warnings: tuple[Annotated[str, Field(min_length=1, max_length=1000)], ...] = ()
+
+    @field_validator("training_seeds")
+    @classmethod
+    def canonical_training_seeds(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(seed < 0 or seed > 2**32 - 1 for seed in values):
+            raise ValueError("training_seeds must be unsigned 32-bit integers")
+        if values != tuple(sorted(set(values))):
+            raise ValueError("training_seeds must be sorted and unique")
+        return values
+
+    @field_validator("repair_warnings")
+    @classmethod
+    def canonical_repair_warnings(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if values != tuple(sorted(set(values))):
+            raise ValueError("repair_warnings must be sorted and unique")
+        return values
+
+    @model_validator(mode="after")
+    def evidence_is_complete_and_consistent(self) -> Self:
+        if self.injected_family_count != len(self.ground_truth):
+            raise ValueError("injected_family_count must match the ground-truth payload")
+        ground_truth_payload = tuple(row.model_dump(mode="json") for row in self.ground_truth)
+        if self.ground_truth_sha256 != canonical_sha256(ground_truth_payload):
+            raise ValueError("ground_truth_sha256 does not match the ground-truth payload")
+
+        source_ids = tuple(row.source_record_id for row in self.ground_truth)
+        derived_ids = tuple(row.derived_record_id for row in self.ground_truth)
+        source_hashes = tuple(row.source_sha256 for row in self.ground_truth)
+        derived_hashes = tuple(row.derived_sha256 for row in self.ground_truth)
+        source_positions = tuple(row.source_train_position for row in self.ground_truth)
+        contaminated_positions = tuple(row.contaminated_test_position for row in self.ground_truth)
+        if len(set(source_ids)) != len(source_ids) or len(set(derived_ids)) != len(derived_ids):
+            raise ValueError("ground-truth source and derived IDs must each be unique")
+        if set(source_ids) & set(derived_ids):
+            raise ValueError("ground-truth source and derived ID sets must be disjoint")
+        if len(set(source_hashes)) != len(source_hashes):
+            raise ValueError("ground-truth source SHA-256 values must be unique")
+        if len(set(derived_hashes)) != len(derived_hashes):
+            raise ValueError("ground-truth derived SHA-256 values must be unique")
+        if set(source_hashes) & set(derived_hashes):
+            raise ValueError("ground-truth source and derived SHA-256 sets must be disjoint")
+        if len(set(source_positions)) != len(source_positions):
+            raise ValueError("ground-truth source positions must be unique")
+        expected_positions = tuple(
+            range(
+                self.shared_clean_holdout_count,
+                self.shared_clean_holdout_count + self.injected_family_count,
+            )
+        )
+        if contaminated_positions != expected_positions:
+            raise ValueError("ground-truth contaminated test positions must be contiguous")
+        if any(row.corruption != self.corruption for row in self.ground_truth):
+            raise ValueError("ground-truth corruption types must match the experiment")
+        if any(row.label >= self.num_classes for row in self.ground_truth):
+            raise ValueError("ground-truth labels must fit the configured class count")
+
+        expected_conditions = (TrainingCondition.CONTAMINATED, TrainingCondition.REPAIRED)
+        conditions = tuple(row.condition for row in self.condition_summaries)
+        if conditions != expected_conditions:
+            raise ValueError("condition_summaries must contain contaminated then repaired")
+        contaminated, repaired = self.condition_summaries
+        if any(position >= contaminated.train_image_count for position in source_positions):
+            raise ValueError(
+                "ground-truth source positions must fit the contaminated training split"
+            )
+        if contaminated.split_manifest_sha256 == repaired.split_manifest_sha256:
+            raise ValueError("contaminated and repaired manifest hashes must differ")
+        if contaminated.train_image_count != repaired.train_image_count:
+            raise ValueError("controlled conditions must have equal training sizes")
+        if contaminated.validation_image_count != repaired.validation_image_count:
+            raise ValueError("controlled conditions must have equal validation sizes")
+        if contaminated.test_image_count != repaired.test_image_count:
+            raise ValueError("controlled conditions must have equal test sizes")
+        if contaminated.injected_derivative_test_count != self.injected_family_count:
+            raise ValueError("every injected derivative must begin in the contaminated test split")
+        if repaired.injected_derivative_test_count > self.injected_family_count:
+            raise ValueError("repaired injected-test count cannot exceed injected families")
+        if contaminated.non_injected_test_count != self.shared_clean_holdout_count:
+            raise ValueError("the contaminated non-injected cohort must be the shared holdout")
+        if repaired.non_injected_test_count < self.shared_clean_holdout_count:
+            raise ValueError("the repaired non-injected cohort must include the shared holdout")
+
+        if self.repair_summary.definite_leakage_groups_before != self.injected_family_count:
+            raise ValueError("repair leakage-before count must match injected families")
+        if self.repair_summary.definite_leakage_groups_after != 0:
+            raise ValueError("a completed experiment must leave zero definite leakage groups")
+        if not self.repair_summary.hard_group_invariant_satisfied:
+            raise ValueError("a completed experiment must satisfy the hard group invariant")
+        if self.repair_split_size_weight == 0.0 and self.repair_class_balance_weight == 0.0:
+            raise ValueError("at least one repair objective weight must be positive")
+        return self
+
+
+class TrainingRun(StrictFrozenModel):
+    seed: Annotated[int, Field(ge=0, le=2**32 - 1)]
+    condition: TrainingCondition
+    resolved_device: Literal["cpu", "cuda"]
     split_manifest_sha256: Sha256
     train_accuracy: AccuracyMetric
     validation_accuracy: AccuracyMetric
     test_accuracy: AccuracyMetric
     per_class_test_accuracy: tuple[NamedAccuracy, ...]
     contaminated_example_accuracy: AccuracyMetric | None = None
-    clean_only_test_accuracy: AccuracyMetric
+    shared_clean_holdout_accuracy: AccuracyMetric
+    non_injected_test_accuracy: AccuracyMetric
     duration_seconds: NonNegativeFloat
 
     @field_validator("per_class_test_accuracy")
@@ -726,12 +889,37 @@ class TrainingRun(StrictFrozenModel):
             raise ValueError("per-class results must have unique names in canonical order")
         return values
 
+    @model_validator(mode="after")
+    def metric_cohorts_are_internally_consistent(self) -> Self:
+        per_class_correct = sum(row.metric.correct for row in self.per_class_test_accuracy)
+        per_class_total = sum(row.metric.total for row in self.per_class_test_accuracy)
+        if (
+            per_class_correct != self.test_accuracy.correct
+            or per_class_total != self.test_accuracy.total
+        ):
+            raise ValueError("per-class metrics must sum to the all-test metric")
+        if (
+            self.contaminated_example_accuracy is not None
+            and self.contaminated_example_accuracy.total == 0
+        ):
+            raise ValueError("an empty injected-derivative cohort must be represented by null")
+        if self.shared_clean_holdout_accuracy.total > self.non_injected_test_accuracy.total:
+            raise ValueError("the shared clean holdout must be part of the non-injected cohort")
+        return self
+
+    @property
+    def clean_only_test_accuracy(self) -> AccuracyMetric:
+        """Compatibility alias for the fixed shared clean holdout metric."""
+
+        return self.shared_clean_holdout_accuracy
+
 
 class TrainingArtifact(StrictFrozenModel):
     artifact_type: Literal["training_results"] = "training_results"
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     metadata: RunMetadata
-    runs: tuple[TrainingRun, ...]
+    summary: TrainingExperimentSummary
+    runs: Annotated[tuple[TrainingRun, ...], Field(min_length=2)]
 
     @field_validator("runs")
     @classmethod
@@ -740,6 +928,47 @@ class TrainingArtifact(StrictFrozenModel):
         if keys != tuple(sorted(set(keys))):
             raise ValueError("training runs must be unique and in canonical order")
         return values
+
+    @model_validator(mode="after")
+    def runs_match_the_serialized_experiment(self) -> Self:
+        if self.metadata.random_seeds != self.summary.training_seeds:
+            raise ValueError("metadata seeds must match the experiment summary")
+        expected_keys = tuple(
+            (condition.value, seed)
+            for condition in (TrainingCondition.CONTAMINATED, TrainingCondition.REPAIRED)
+            for seed in self.summary.training_seeds
+        )
+        actual_keys = tuple((run.condition.value, run.seed) for run in self.runs)
+        if actual_keys != expected_keys:
+            raise ValueError("every seed must have exactly one contaminated and repaired run")
+
+        condition_by_name = {row.condition: row for row in self.summary.condition_summaries}
+        for run in self.runs:
+            condition = condition_by_name[run.condition]
+            if run.resolved_device != self.summary.resolved_device:
+                raise ValueError("run device must match the resolved experiment device")
+            if run.split_manifest_sha256 != condition.split_manifest_sha256:
+                raise ValueError("run split hash must match its condition summary")
+            if run.train_accuracy.total != condition.train_image_count:
+                raise ValueError("run training total must match its condition summary")
+            if run.validation_accuracy.total != condition.validation_image_count:
+                raise ValueError("run validation total must match its condition summary")
+            if run.test_accuracy.total != condition.test_image_count:
+                raise ValueError("run test total must match its condition summary")
+            if run.shared_clean_holdout_accuracy.total != self.summary.shared_clean_holdout_count:
+                raise ValueError("run shared-holdout total must match the experiment summary")
+            if run.non_injected_test_accuracy.total != condition.non_injected_test_count:
+                raise ValueError("run non-injected total must match its condition summary")
+            if condition.injected_derivative_test_count == 0:
+                if run.contaminated_example_accuracy is not None:
+                    raise ValueError("empty injected-derivative cohorts must have a null metric")
+            elif (
+                run.contaminated_example_accuracy is None
+                or run.contaminated_example_accuracy.total
+                != condition.injected_derivative_test_count
+            ):
+                raise ValueError("run injected-derivative total must match its condition summary")
+        return self
 
 
 __all__ = [
@@ -777,6 +1006,9 @@ __all__ = [
     "StrictFrozenModel",
     "TrainingArtifact",
     "TrainingCondition",
+    "TrainingConditionSummary",
+    "TrainingContaminationGroundTruth",
+    "TrainingExperimentSummary",
     "TrainingRun",
     "ValidationIssue",
     "ValidationIssueCode",

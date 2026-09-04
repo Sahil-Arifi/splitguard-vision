@@ -49,6 +49,11 @@ from splitguard.schemas import (
     canonical_json,
     canonical_sha256,
 )
+from splitguard.training import (
+    CifarExperimentConfig,
+    ExperimentConfigError,
+    run_cifar_experiment,
+)
 from splitguard.validation import scan_images
 
 app = typer.Typer(
@@ -321,6 +326,81 @@ def benchmark_scale(
                 "embedding_source": config.scaling.embedding_source,
                 "metric_rows": len(artifact.rows),
                 "seed": config.seed,
+            },
+            allow_nan=False,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command()
+def experiment(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", help="Validated CIFAR-10 experiment YAML configuration."),
+    ] = Path("configs/cifar10_experiment.yaml"),
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            help="Destination for canonical raw training-results JSON.",
+        ),
+    ] = Path("artifacts/training_results.json"),
+) -> None:
+    """Run matched contaminated and repaired CIFAR-10 training conditions."""
+
+    try:
+        config = CifarExperimentConfig.from_yaml(config_path)
+        artifact = run_cifar_experiment(
+            config,
+            project_root=Path.cwd(),
+            repo_root=Path(__file__).parents[2],
+        )
+        _write_json_artifact(output, artifact)
+    except ExperimentConfigError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--config") from exc
+    except (ImportError, OSError, RuntimeError, TypeError, ValidationError, ValueError) as exc:
+        raise typer.BadParameter(
+            "experiment failed; no training artifact was published",
+            param_hint="--config",
+        ) from exc
+
+    typer.echo(
+        json.dumps(
+            {
+                "artifact": output.name,
+                "configuration_sha256": artifact.metadata.configuration_sha256,
+                "dataset_manifest_sha256": artifact.metadata.dataset_manifest_sha256,
+                "results": [
+                    {
+                        "all_test_accuracy": run.test_accuracy.accuracy,
+                        "condition": run.condition.value,
+                        "contaminated_example_accuracy": (
+                            run.contaminated_example_accuracy.accuracy
+                            if run.contaminated_example_accuracy is not None
+                            else None
+                        ),
+                        "duration_seconds": run.duration_seconds,
+                        "non_injected_test_accuracy": run.non_injected_test_accuracy.accuracy,
+                        "resolved_device": run.resolved_device,
+                        "seed": run.seed,
+                        "shared_clean_holdout_accuracy": (
+                            run.shared_clean_holdout_accuracy.accuracy
+                        ),
+                        "split_manifest_sha256": run.split_manifest_sha256,
+                        "train_accuracy": run.train_accuracy.accuracy,
+                        "validation_accuracy": run.validation_accuracy.accuracy,
+                    }
+                    for run in artifact.runs
+                ],
+                "dataset_source": artifact.summary.dataset_source,
+                "injected_family_count": artifact.summary.injected_family_count,
+                "repair_hard_group_invariant_satisfied": (
+                    artifact.summary.repair_summary.hard_group_invariant_satisfied
+                ),
+                "resolved_device": artifact.summary.resolved_device,
+                "run_count": len(artifact.runs),
+                "seeds": artifact.metadata.random_seeds,
             },
             allow_nan=False,
             sort_keys=True,

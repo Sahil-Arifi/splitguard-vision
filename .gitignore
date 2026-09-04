@@ -18,6 +18,7 @@ htmlcov/
 data/
 datasets/
 demo-data/
+.splitguard-data/
 cifar-10-batches-py/
 *.pth
 *.pt
