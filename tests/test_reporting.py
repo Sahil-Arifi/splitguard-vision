@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from matplotlib.figure import Figure
 from PIL import Image
 
 import splitguard.reporting as reporting_module
@@ -645,6 +646,139 @@ def test_generate_full_local_report_from_validated_raw_artifacts(tmp_path: Path)
         for path in fixture.dataset_root.rglob("*.png")
     }
     assert not tuple(tmp_path.glob(".splitguard-report-*"))
+
+
+def test_detection_chart_facets_corruptions_and_uses_one_compact_detector_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _artifact_fixture(tmp_path)
+    original = DetectionBenchmarkArtifact.model_validate_json(fixture.detection_path.read_bytes())
+    detectors = ("sha256_exact", "phash_hamming", "detector_c", "detector_d")
+    corruptions = (
+        "brightness_shift",
+        "cross_label_duplicate",
+        "cross_split_copy",
+        "exact_copy",
+        "gaussian_blur",
+        "jpeg_recompression",
+        "resize",
+        "small_crop",
+    )
+    rows = tuple(
+        DetectionMetricRow(
+            detector=detector,
+            corruption_type=corruption,
+            threshold=float(point),
+            metrics=(
+                BinaryMetrics.from_counts(1, 0, 3)
+                if point == 0
+                else BinaryMetrics.from_counts(3, 1, 1)
+            ),
+        )
+        for detector in detectors
+        for corruption in corruptions
+        for point in range(2)
+    )
+    detection = DetectionBenchmarkArtifact(
+        metadata=original.metadata,
+        embedding_provenance=original.embedding_provenance,
+        rows=rows,
+    )
+    captured: list[Figure] = []
+
+    def capture(figure: Figure, _path: Path) -> None:
+        captured.append(figure)
+
+    monkeypatch.setattr(reporting_module, "_save_figure", capture)
+    reporting_module._chart_detection(detection, tmp_path / "unused.png")
+
+    assert len(captured) == 1
+    figure = captured[0]
+    assert len(figure.axes) == len(corruptions) + 2
+    data_axes = figure.axes[:-2]
+    assert sum(len(axes.lines) for axes in data_axes) == len(detectors) * len(corruptions)
+    assert all(axes.get_legend() is None for axes in data_axes)
+    assert {axes.get_title() for axes in data_axes} == {
+        corruption.replace("_", " ").title() for corruption in corruptions
+    }
+    legend = figure.axes[-2].get_legend()
+    assert legend is not None
+    assert len(legend.get_texts()) == len(detectors)
+    disclosure = " ".join(text.get_text() for text in figure.axes[-1].texts)
+    assert "Every artifact row is plotted" in disclosure
+
+
+def test_runtime_chart_facets_all_stage_mode_series_with_local_legends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _artifact_fixture(tmp_path)
+    original = ScalingBenchmarkArtifact.model_validate_json(fixture.scaling_path.read_bytes())
+    stage_modes = (
+        ("embedding_flat_vs_hnsw_total", "pixel_derived_fake_embeddings_not_dinov2"),
+        (
+            "embedding_index_build",
+            "pixel_derived_fake_embeddings_not_dinov2_flat_ip_exact",
+        ),
+        (
+            "embedding_index_build",
+            "pixel_derived_fake_embeddings_not_dinov2_hnsw_approximate",
+        ),
+        (
+            "embedding_query",
+            "pixel_derived_fake_embeddings_not_dinov2_flat_ip_exact",
+        ),
+        (
+            "embedding_query",
+            "pixel_derived_fake_embeddings_not_dinov2_hnsw_approximate",
+        ),
+        ("image_embedding", "pixel_derived_fake_embeddings_not_dinov2"),
+        ("image_validation_sha256", "pillow_decode_and_sha256_local_files"),
+        ("local_image_generation", "deterministic_generated_png_files"),
+        ("manifest_discovery", "imagefolder_local_files"),
+        ("phash_computation", "internal_64bit_dct_local_files"),
+        ("phash_index_build", "bk_tree"),
+        ("phash_query", "bk_tree"),
+        ("phash_query", "brute_force_reference_small_n_only"),
+        (
+            "total_local_audit",
+            "sum_manifest_validation_phash_bk_embedding_and_faiss_stages",
+        ),
+    )
+    rows = tuple(
+        ScalingMetricRow(
+            dataset_size=dataset_size,
+            stage=stage,
+            mode=mode,
+            duration_seconds=(pair_index + 1) * dataset_size / 1000,
+        )
+        for pair_index, (stage, mode) in enumerate(stage_modes)
+        for dataset_size in (
+            (100,) if mode == "brute_force_reference_small_n_only" else (100, 1000)
+        )
+    )
+    scaling = ScalingBenchmarkArtifact(metadata=original.metadata, rows=rows)
+    captured: list[Figure] = []
+
+    def capture(figure: Figure, _path: Path) -> None:
+        captured.append(figure)
+
+    monkeypatch.setattr(reporting_module, "_save_figure", capture)
+    reporting_module._chart_scaling(scaling, tmp_path / "unused.png")
+
+    assert len(captured) == 1
+    figure = captured[0]
+    stage_count = len({stage for stage, _mode in stage_modes})
+    assert len(figure.axes) == stage_count + 2
+    data_axes = figure.axes[:-2]
+    assert sum(len(axes.lines) for axes in data_axes) == len(stage_modes)
+    legends = tuple(axes.get_legend() for axes in data_axes)
+    assert all(legend is not None for legend in legends)
+    assert max(len(legend.get_texts()) for legend in legends if legend is not None) == 2
+    disclosure = " ".join(text.get_text() for axes in figure.axes[-2:] for text in axes.texts)
+    assert f"All {len(stage_modes)} artifact stage/mode series are shown" in disclosure
+    assert "independent y-scales" in disclosure
 
 
 def test_no_thumbnails_replaces_only_owned_thumbnail_directory(

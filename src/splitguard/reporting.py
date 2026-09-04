@@ -16,6 +16,7 @@ from typing import TypeVar
 
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ValidationError
 
@@ -603,28 +604,131 @@ def _chart_detection(
     detection: DetectionBenchmarkArtifact | None,
     path: Path,
 ) -> None:
-    figure, axes = _figure("Detection precision-recall", "Recall", "Precision")
     if detection is None or not detection.rows:
+        figure, axes = _figure("Detection precision-recall", "Recall", "Precision")
         _empty_chart(axes, "Detection benchmark artifact not supplied")
-    else:
-        groups: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
-        for row in detection.rows:
-            groups[(row.detector, row.corruption_type)].append(
-                (row.metrics.recall, row.metrics.precision)
-            )
-        for (detector, corruption), points in sorted(groups.items()):
+        _save_figure(figure, path)
+        return
+
+    def detector_label(detector: str) -> str:
+        known = {
+            "sha256_exact": "SHA-256 exact",
+            "phash_hamming": "pHash Hamming",
+            "combined_exact_phash_embedding_review_only": (
+                "Combined pipeline (embedding review-only)"
+            ),
+            "synthetic_fake_embedding_cosine_not_dinov2": ("Synthetic fake cosine (not DINOv2)"),
+        }
+        if detector in known:
+            return known[detector]
+        if detector.startswith("dinov2_embedding_cosine@"):
+            return detector.replace("dinov2_embedding_cosine@", "DINOv2 cosine @")
+        if detector.startswith("custom_embedding_cosine@"):
+            return detector.replace("custom_embedding_cosine@", "Custom cosine @")
+        cleaned = _safe_text(detector).replace("_", " ")
+        return cleaned if len(cleaned) <= 54 else f"{cleaned[:51]}…"
+
+    groups: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
+    for row in detection.rows:
+        groups[(row.corruption_type, row.detector)].append(
+            (row.metrics.recall, row.metrics.precision)
+        )
+    corruptions = sorted({key[0] for key in groups})
+    detectors = sorted({key[1] for key in groups})
+    columns = min(2, len(corruptions))
+    panel_rows = (len(corruptions) + columns - 1) // columns
+    figure = Figure(
+        figsize=(10.4, max(5.2, panel_rows * 2.55 + 1.15)),
+        dpi=120,
+        facecolor="#fbfaf7",
+    )
+    FigureCanvasAgg(figure)
+    grid = figure.add_gridspec(
+        panel_rows + 1,
+        columns,
+        height_ratios=(*([1.0] * panel_rows), 0.72),
+    )
+    figure.suptitle(
+        "Detection precision-recall by corruption",
+        color="#18232b",
+        weight="bold",
+    )
+    palette = ("#315d73", "#b7663f", "#718355", "#725b83", "#af8f3c", "#597b8c")
+    markers = ("o", "s", "^", "D", "P", "X")
+    line_styles = ("-", "--", "-.", ":")
+    detector_style = {
+        detector: (
+            palette[index % len(palette)],
+            markers[index % len(markers)],
+            line_styles[index % len(line_styles)],
+        )
+        for index, detector in enumerate(detectors)
+    }
+    legend_handles: dict[str, Line2D] = {}
+    for index, corruption in enumerate(corruptions):
+        panel_row, panel_column = divmod(index, columns)
+        axes = figure.add_subplot(grid[panel_row, panel_column])
+        for detector in detectors:
+            points = groups.get((corruption, detector))
+            if not points:
+                continue
             ordered = sorted(points)
-            label = _safe_text(f"{detector} · {corruption}")[:90]
-            axes.plot(  # type: ignore[attr-defined]
+            color, marker, line_style = detector_style[detector]
+            line = axes.plot(
                 [point[0] for point in ordered],
                 [point[1] for point in ordered],
-                marker="o",
-                linewidth=1.4,
-                label=label,
-            )
-        axes.set_xlim(-0.02, 1.02)  # type: ignore[attr-defined]
-        axes.set_ylim(-0.02, 1.02)  # type: ignore[attr-defined]
-        axes.legend(fontsize=7, loc="best")  # type: ignore[attr-defined]
+                color=color,
+                marker=marker,
+                linestyle=line_style,
+                linewidth=1.5,
+                markersize=4.2,
+            )[0]
+            legend_handles.setdefault(detector, line)
+        axes.set_title(
+            _safe_text(corruption).replace("_", " ").title(),
+            fontsize=9,
+            weight="bold",
+        )
+        axes.set_xlim(-0.02, 1.02)
+        axes.set_ylim(-0.02, 1.02)
+        axes.grid(alpha=0.2)
+        axes.tick_params(labelsize=7.5)
+        if panel_column == 0:
+            axes.set_ylabel("Precision", fontsize=8)
+        else:
+            axes.tick_params(labelleft=False)
+        if panel_row == panel_rows - 1 or index + columns >= len(corruptions):
+            axes.set_xlabel("Recall", fontsize=8)
+        else:
+            axes.tick_params(labelbottom=False)
+
+    legend_axes = figure.add_subplot(grid[panel_rows, 0])
+    legend_axes.axis("off")
+    legend_axes.legend(
+        [legend_handles[detector] for detector in detectors if detector in legend_handles],
+        [detector_label(detector) for detector in detectors if detector in legend_handles],
+        loc="center left",
+        ncol=1,
+        frameon=False,
+        fontsize=8,
+        handlelength=2.6,
+        columnspacing=1.4,
+    )
+    note_axes = legend_axes
+    if columns > 1:
+        note_axes = figure.add_subplot(grid[panel_rows, 1])
+        note_axes.axis("off")
+    note_axes.text(
+        0.02 if columns > 1 else 0.5,
+        0.5 if columns > 1 else 0.02,
+        "Every artifact row is plotted; display labels are shortened.\n"
+        "Exact detector IDs and thresholds remain in the benchmark table.",
+        ha="left" if columns > 1 else "center",
+        va="center" if columns > 1 else "bottom",
+        fontsize=7.5,
+        color="#59636b",
+        transform=note_axes.transAxes,
+    )
     _save_figure(figure, path)
 
 
@@ -632,23 +736,158 @@ def _chart_scaling(
     scaling: ScalingBenchmarkArtifact | None,
     path: Path,
 ) -> None:
-    figure, axes = _figure("Runtime scaling", "Dataset size", "Duration (seconds)")
     if scaling is None or not scaling.rows:
+        figure, axes = _figure("Runtime scaling", "Dataset size", "Duration (seconds)")
         _empty_chart(axes, "Scaling benchmark artifact not supplied")
-    else:
-        groups: dict[tuple[str, str], list[tuple[int, float]]] = defaultdict(list)
-        for row in scaling.rows:
-            groups[(row.stage, row.mode)].append((row.dataset_size, row.duration_seconds))
-        for (stage, mode), points in sorted(groups.items()):
-            ordered = sorted(points)
-            axes.plot(  # type: ignore[attr-defined]
+        _save_figure(figure, path)
+        return
+
+    def stage_label(stage: str) -> str:
+        known = {
+            "local_image_generation": "Local image generation",
+            "manifest_discovery": "Manifest discovery",
+            "image_validation_sha256": "Image validation + SHA-256",
+            "phash_computation": "pHash computation",
+            "phash_index_build": "pHash index build",
+            "phash_query": "pHash query",
+            "image_embedding": "Image embedding",
+            "embedding_index_build": "Embedding index build",
+            "embedding_query": "Embedding query",
+            "embedding_flat_vs_hnsw_total": "FlatIP vs HNSW total",
+            "total_local_audit": "Total local audit",
+        }
+        return known.get(stage, _safe_text(stage).replace("_", " ").title())
+
+    def mode_label(mode: str) -> str:
+        known = {
+            "pixel_derived_fake_embeddings_not_dinov2": (
+                "Pixel-derived fake embeddings (not DINOv2)"
+            ),
+            "pixel_derived_fake_embeddings_not_dinov2_flat_ip_exact": (
+                "FlatIP exact · fake embeddings"
+            ),
+            "pixel_derived_fake_embeddings_not_dinov2_hnsw_approximate": (
+                "HNSW approximate · fake embeddings"
+            ),
+            "pillow_decode_and_sha256_local_files": "Pillow decode + SHA-256",
+            "deterministic_generated_png_files": "Deterministic PNG generation",
+            "imagefolder_local_files": "Local ImageFolder discovery",
+            "internal_64bit_dct_local_files": "Internal 64-bit DCT",
+            "bk_tree": "BK-tree",
+            "brute_force_reference_small_n_only": "Brute-force reference (small N only)",
+            "sum_manifest_validation_phash_bk_embedding_and_faiss_stages": (
+                "Manifest + validation + pHash + embedding + FAISS"
+            ),
+        }
+        if mode in known:
+            return known[mode]
+        cleaned = _safe_text(mode).replace("_", " ")
+        return cleaned if len(cleaned) <= 48 else f"{cleaned[:45]}…"
+
+    groups: dict[tuple[str, str], list[tuple[int, float]]] = defaultdict(list)
+    for row in scaling.rows:
+        groups[(row.stage, row.mode)].append((row.dataset_size, row.duration_seconds))
+    stage_order = (
+        "local_image_generation",
+        "manifest_discovery",
+        "image_validation_sha256",
+        "phash_computation",
+        "phash_index_build",
+        "phash_query",
+        "image_embedding",
+        "embedding_index_build",
+        "embedding_query",
+        "embedding_flat_vs_hnsw_total",
+        "total_local_audit",
+    )
+    stage_priority = {stage: index for index, stage in enumerate(stage_order)}
+    stages = sorted(
+        {key[0] for key in groups},
+        key=lambda stage: (stage_priority.get(stage, len(stage_priority)), stage),
+    )
+    columns = min(2, len(stages))
+    panel_rows = (len(stages) + columns - 1) // columns
+    figure = Figure(
+        figsize=(10.4, max(5.2, panel_rows * 2.35 + 1.15)),
+        dpi=120,
+        facecolor="#fbfaf7",
+    )
+    FigureCanvasAgg(figure)
+    grid = figure.add_gridspec(
+        panel_rows + 1,
+        columns,
+        height_ratios=(*([1.0] * panel_rows), 0.55),
+    )
+    figure.suptitle("Runtime scaling by pipeline stage", color="#18232b", weight="bold")
+    colors = ("#315d73", "#b7663f", "#718355", "#725b83")
+    markers = ("o", "s", "^", "D")
+    for index, stage in enumerate(stages):
+        panel_row, panel_column = divmod(index, columns)
+        axes = figure.add_subplot(grid[panel_row, panel_column])
+        modes = sorted(mode for group_stage, mode in groups if group_stage == stage)
+        for mode_index, mode in enumerate(modes):
+            ordered = sorted(groups[(stage, mode)])
+            axes.plot(
                 [point[0] for point in ordered],
                 [point[1] for point in ordered],
-                marker="o",
-                linewidth=1.5,
-                label=_safe_text(f"{stage} · {mode}")[:90],
+                color=colors[mode_index % len(colors)],
+                marker=markers[mode_index % len(markers)],
+                linewidth=1.55,
+                markersize=4.2,
+                label=mode_label(mode),
             )
-        axes.legend(fontsize=8, loc="best")  # type: ignore[attr-defined]
+        axes.set_title(stage_label(stage), fontsize=9, weight="bold")
+        axes.set_ylim(bottom=0.0)
+        axes.grid(alpha=0.2)
+        axes.tick_params(labelsize=7.5)
+        axes.ticklabel_format(axis="x", style="plain")
+        axes.set_ylabel("Seconds", fontsize=8)
+        if panel_row == panel_rows - 1 or index + columns >= len(stages):
+            axes.set_xlabel("Dataset images", fontsize=8)
+        else:
+            axes.tick_params(labelbottom=False)
+        axes.legend(
+            loc="upper left",
+            frameon=False,
+            fontsize=6.8,
+            handlelength=2.2,
+        )
+
+    count_note_axes = figure.add_subplot(grid[panel_rows, 0])
+    count_note_axes.axis("off")
+    count_note = (
+        f"All {len(groups)} artifact stage/mode series are shown.\n"
+        "Panels use independent y-scales.\n"
+        "One point means larger sizes were not measured."
+    )
+    if columns == 1:
+        count_note += (
+            "\nExact seconds, memory scope, and full identifiers remain in the runtime table."
+        )
+    count_note_axes.text(
+        0.02,
+        0.5,
+        count_note,
+        ha="left",
+        va="center",
+        fontsize=7.5,
+        color="#59636b",
+        transform=count_note_axes.transAxes,
+    )
+    if columns > 1:
+        table_note_axes = figure.add_subplot(grid[panel_rows, 1])
+        table_note_axes.axis("off")
+        table_note_axes.text(
+            0.02,
+            0.5,
+            "Exact seconds and memory scope remain in the runtime table.\n"
+            "Full stage/mode identifiers are preserved there.",
+            ha="left",
+            va="center",
+            fontsize=7.5,
+            color="#59636b",
+            transform=table_note_axes.transAxes,
+        )
     _save_figure(figure, path)
 
 
