@@ -1,0 +1,37 @@
+# Python and uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Dataset and model material
+data/
+datasets/
+demo-data/
+cifar-10-batches-py/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# SplitGuard private/generated state
+.splitguard-cache/
+**/embedding-cache/
+artifacts/*
+!artifacts/.gitkeep
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,40 @@
+io:
+  max_image_pixels: 50000000
+  thumbnail_size: 256
+  cache_dir: .splitguard-cache
+
+phash:
+  enabled: true
+  hamming_threshold: 8
+
+embeddings:
+  enabled: true
+  model: facebook/dinov2-small
+  device: auto
+  batch_size: 32
+
+neighbors:
+  index: hnsw
+  k: 20
+  cosine_threshold: 0.95
+  hnsw_m: 32
+  hnsw_ef_construction: 200
+  hnsw_ef_search: 64
+
+policy:
+  exact_is_duplicate: true
+  phash_is_duplicate: true
+  embedding_only_requires_review: true
+
+repair:
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  split_size_weight: 1.0
+  class_balance_weight: 1.0
+  random_seed: 42
+  local_improvement_iterations: 250
+  local_improvement_patience: 25
+
+report:
+  output_dir: artifacts
