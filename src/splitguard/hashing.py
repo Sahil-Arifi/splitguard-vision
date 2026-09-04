@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from io import BytesIO
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Self
 
 import numpy as np
@@ -29,6 +32,10 @@ _EVALUATION_BOUNDARIES = (
     (Split.TRAIN, Split.TEST),
     (Split.VAL, Split.TEST),
 )
+
+
+class PhashInputError(RuntimeError):
+    """Raised when a validated local image changed or became inaccessible."""
 
 
 def _exact_cluster_id(byte_sha256: str) -> str:
@@ -361,6 +368,49 @@ def brute_force_phash_pairs(
     return tuple(candidates)
 
 
+def fingerprint_records(
+    dataset_root: str | Path,
+    records: Iterable[ImageRecord],
+) -> tuple[ImageRecord, ...]:
+    """Attach pHash values to validated records without changing source files."""
+
+    try:
+        root = Path(dataset_root).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise PhashInputError("dataset root could not be resolved") from exc
+    if not root.is_dir():
+        raise PhashInputError("dataset root must be a directory")
+
+    ordered = tuple(sorted(records, key=lambda record: record.id))
+    if len({record.id for record in ordered}) != len(ordered):
+        raise ValueError("records must have unique IDs")
+
+    fingerprinted: list[ImageRecord] = []
+    for record in ordered:
+        candidate = root.joinpath(*PurePosixPath(record.path).parts)
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise PhashInputError(f"record {record.id} is not an accessible file") from exc
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            raise PhashInputError(
+                f"record {record.id} is outside the dataset root or not a file"
+            )
+        try:
+            contents = resolved.read_bytes()
+        except OSError as exc:
+            raise PhashInputError(f"record {record.id} could not be read") from exc
+        if hashlib.sha256(contents).hexdigest() != record.byte_sha256:
+            raise PhashInputError(f"record {record.id} content changed after validation")
+        try:
+            with Image.open(BytesIO(contents)) as image:
+                phash = compute_phash(image)
+        except (OSError, SyntaxError, ValueError) as exc:
+            raise PhashInputError(f"record {record.id} could not be fingerprinted") from exc
+        fingerprinted.append(record.model_copy(update={"phash": phash}))
+    return tuple(fingerprinted)
+
+
 def group_exact_duplicates(records: Iterable[ImageRecord]) -> tuple[ExactDuplicateCluster, ...]:
     """Group records with the same SHA-256 digest into canonical clusters.
 
@@ -410,9 +460,11 @@ __all__ = [
     "BKTree",
     "ExactDuplicateCluster",
     "PhashCandidatePair",
+    "PhashInputError",
     "PhashMatch",
     "brute_force_phash_pairs",
     "compute_phash",
+    "fingerprint_records",
     "group_exact_duplicates",
     "hamming_distance",
     "indexed_phash_pairs",

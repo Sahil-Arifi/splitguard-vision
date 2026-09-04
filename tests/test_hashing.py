@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import random
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -15,6 +17,7 @@ from splitguard.hashing import (
     PhashCandidatePair,
     brute_force_phash_pairs,
     compute_phash,
+    fingerprint_records,
     group_exact_duplicates,
     hamming_distance,
     indexed_phash_pairs,
@@ -411,3 +414,40 @@ def test_pair_search_rejects_duplicate_record_ids() -> None:
         indexed_phash_pairs((duplicate, duplicate), radius=0)
     with pytest.raises(ValueError, match="record_id is duplicated"):
         brute_force_phash_pairs((duplicate, duplicate), radius=0)
+
+
+def test_fingerprint_records_attaches_hashes_without_changing_source(tmp_path: Path) -> None:
+    image_path = tmp_path / "train" / "cat" / "sample.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (12, 10), (25, 100, 220)).save(image_path)
+    original_bytes = image_path.read_bytes()
+    source = record(
+        "train/cat/sample.png",
+        sha=hashlib.sha256(original_bytes).hexdigest(),
+        byte_size=len(original_bytes),
+    )
+
+    (fingerprinted,) = fingerprint_records(tmp_path, (source,))
+
+    assert fingerprinted.phash is not None
+    assert fingerprinted.byte_sha256 == source.byte_sha256
+    assert source.phash is None
+    assert image_path.read_bytes() == original_bytes
+
+
+def test_fingerprint_records_rejects_changed_content_without_path_leakage(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "train" / "cat" / "sample.png"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (8, 8), "red").save(image_path)
+    source = record(
+        "train/cat/sample.png",
+        sha=hashlib.sha256(image_path.read_bytes()).hexdigest(),
+    )
+    Image.new("RGB", (8, 8), "blue").save(image_path)
+
+    with pytest.raises(RuntimeError, match="content changed") as error:
+        fingerprint_records(tmp_path, (source,))
+
+    assert str(tmp_path) not in str(error.value)
