@@ -705,7 +705,10 @@ def audit(
         RuntimeError,
         ValueError,
     ) as exc:
-        raise typer.BadParameter(str(exc), param_hint="DATASET") from exc
+        raise typer.BadParameter(
+            "audit failed before verified publication",
+            param_hint="DATASET/--config/--output",
+        ) from exc
 
     typer.echo(
         json.dumps(

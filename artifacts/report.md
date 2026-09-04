@@ -9,7 +9,7 @@ Generated locally from strict JSON artifacts. Display values are rounded; source
 | Valid images | 5 |
 | Invalid images | 1 |
 | Definite leakage groups | 1 |
-| Contaminated evaluation images | 5 |
+| Contaminated images | 5 |
 | Contaminated evaluation fraction | 1.000000 |
 | Semantic-only review candidates | 0 |
 | Cross-label conflicts | 1 |

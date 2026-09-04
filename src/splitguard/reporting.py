@@ -1012,7 +1012,7 @@ def _render_markdown(
         ("Valid images", audit.summary.valid_image_count),
         ("Invalid images", audit.summary.invalid_image_count),
         ("Definite leakage groups", audit.summary.leakage_group_count),
-        ("Contaminated evaluation images", audit.summary.contaminated_image_count),
+        ("Contaminated images", audit.summary.contaminated_image_count),
         (
             "Contaminated evaluation fraction",
             _metric(audit.summary.contaminated_evaluation_fraction),

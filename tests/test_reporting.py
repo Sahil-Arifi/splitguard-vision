@@ -253,7 +253,7 @@ def _artifact_fixture(tmp_path: Path) -> ArtifactFixture:
             valid_image_count=4,
             invalid_image_count=1,
             leakage_group_count=2,
-            contaminated_image_count=3,
+            contaminated_image_count=4,
             evaluation_image_count=3,
             contaminated_evaluation_fraction=1.0,
             exact_leakage_group_count=1,
@@ -575,6 +575,10 @@ def test_generate_full_local_report_from_validated_raw_artifacts(tmp_path: Path)
     )
     assert all(section in html for section in expected_sections)
     assert all(section in markdown for section in expected_sections)
+    assert "| Contaminated images | 4 |" in markdown
+    assert "Contaminated evaluation images" not in markdown
+    assert "Contaminated evaluation</span><strong>100.00%" in html
+    assert "Contaminated evaluation images" not in html
     assert "Shared clean holdout accuracy (paired)" in html
     assert "All condition-test accuracy" in html
     assert "Non-injected condition-test accuracy" in html

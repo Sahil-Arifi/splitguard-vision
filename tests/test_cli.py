@@ -826,6 +826,44 @@ def test_audit_writes_private_path_free_artifact_without_network(tmp_path: Path)
     assert "audit.json" in result.stdout
 
 
+@pytest.mark.parametrize("failure_type", (OSError, RuntimeError, ValueError))
+def test_audit_hides_late_failure_paths_and_publishes_no_artifact(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    failure_type: type[Exception],
+) -> None:
+    dataset = tmp_path / "private" / "dataset"
+    train = dataset / "train" / "cat"
+    train.mkdir(parents=True)
+    Image.new("RGB", (12, 12), (40, 80, 120)).save(train / "source.png")
+    output = tmp_path / "private" / "results" / "audit.json"
+
+    def fail_with_private_path(*_args: object, **_kwargs: object) -> Never:
+        raise failure_type(f"failed while publishing {tmp_path}")
+
+    monkeypatch.setattr(cli_module, "_write_json_artifact", fail_with_private_path)
+    result = runner.invoke(
+        app,
+        [
+            "audit",
+            str(dataset),
+            "--config",
+            str(Path(__file__).parents[1] / "configs" / "default.yaml"),
+            "--output",
+            str(output),
+            "--no-embeddings",
+        ],
+    )
+    rendered = _plain_cli_output(result.output)
+
+    assert result.exit_code == 2
+    assert "failed before verified" in rendered
+    assert "publication" in rendered
+    assert "Traceback" not in rendered
+    assert str(tmp_path) not in rendered
+    assert not output.exists()
+
+
 def create_audit_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     dataset = tmp_path / "private-dataset"
     train = dataset / "train" / "cat"
