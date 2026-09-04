@@ -52,6 +52,8 @@ phash:
 embeddings:
   enabled: true
   model: facebook/dinov2-small
+  model_revision: ed25f3a31f01632728cabb09d1542f84ab7b0056
+  preprocessing_version: hf-auto-image-processor-v1
   device: cpu
   batch_size: 16
 neighbors:
@@ -83,6 +85,7 @@ report:
     config = load_config(config_path)
 
     assert config.io.max_image_pixels == 40_000_000
+    assert config.embeddings.model_revision == "ed25f3a31f01632728cabb09d1542f84ab7b0056"
     assert config.neighbors.hnsw_m == 24
     assert config.repair.local_improvement_iterations == 120
     assert config.report.output_dir == Path("artifacts/report")
@@ -94,6 +97,7 @@ def test_committed_default_configuration_is_valid() -> None:
     config = load_config(config_path)
 
     assert config.embeddings.model == "facebook/dinov2-small"
+    assert config.embeddings.preprocessing_version == "hf-auto-image-processor-v1"
     assert config.repair.train_ratio == 0.8
     assert config.report.output_dir == Path("artifacts")
 
@@ -137,6 +141,13 @@ def test_ratio_validation_uses_decimal_tolerance() -> None:
 def test_ratio_values_must_be_finite_and_bounded(value: float) -> None:
     with pytest.raises(ValidationError):
         RepairConfig(train_ratio=value, val_ratio=0.1, test_ratio=0.1)
+
+
+def test_embedding_revision_must_be_an_immutable_commit() -> None:
+    with pytest.raises(ValidationError, match="model_revision"):
+        SplitGuardConfig.model_validate(
+            {"embeddings": {"model_revision": "main"}}
+        )
 
 
 def test_repair_objective_and_local_improvement_are_validated() -> None:

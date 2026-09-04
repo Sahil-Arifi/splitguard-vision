@@ -10,6 +10,8 @@ phash:
 embeddings:
   enabled: true
   model: facebook/dinov2-small
+  model_revision: ed25f3a31f01632728cabb09d1542f84ab7b0056
+  preprocessing_version: hf-auto-image-processor-v1
   device: auto
   batch_size: 32
 

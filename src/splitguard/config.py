@@ -91,6 +91,14 @@ class EmbeddingsConfig(FrozenStrictModel):
 
     enabled: bool = True
     model: str = Field(default="facebook/dinov2-small", min_length=1)
+    model_revision: str = Field(
+        default="ed25f3a31f01632728cabb09d1542f84ab7b0056",
+        pattern=r"^[0-9a-f]{40}$",
+    )
+    preprocessing_version: str = Field(
+        default="hf-auto-image-processor-v1",
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$",
+    )
     device: Literal["auto", "cpu", "cuda"] = "auto"
     batch_size: int = Field(default=32, gt=0)
 
