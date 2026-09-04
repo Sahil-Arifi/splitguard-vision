@@ -482,9 +482,22 @@ class RepairArtifact(StrictFrozenModel):
     artifact_type: Literal["repair"] = "repair"
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     metadata: RunMetadata
-    requested_ratios: Annotated[tuple[SplitRatio, ...], Field(min_length=1)]
+    requested_ratios: Annotated[
+        tuple[SplitRatio, ...], Field(min_length=3, max_length=3)
+    ]
+    integer_targets: Annotated[
+        tuple[tuple[Split, NonNegativeInt], ...], Field(min_length=3, max_length=3)
+    ]
     assignments: tuple[RepairAssignment, ...]
     excluded_invalid_ids: tuple[StableId, ...] = ()
+    infeasibility_warnings: tuple[
+        Annotated[str, Field(min_length=1, max_length=1000)], ...
+    ] = ()
+    split_size_weight: NonNegativeFloat
+    class_balance_weight: NonNegativeFloat
+    random_seed: Annotated[int, Field(ge=0)]
+    local_improvement_iterations: NonNegativeInt
+    repaired_manifest_sha256: Sha256
     before_split_statistics: tuple[SplitStatistics, ...]
     after_split_statistics: tuple[SplitStatistics, ...]
     summary: RepairSummary
@@ -492,8 +505,9 @@ class RepairArtifact(StrictFrozenModel):
     @model_validator(mode="after")
     def valid_repair_contract(self) -> Self:
         splits = tuple(item.split for item in self.requested_ratios)
-        if splits != tuple(sorted(set(splits), key=_SPLIT_ORDER.__getitem__)):
-            raise ValueError("requested_ratios must have unique splits in canonical order")
+        expected_splits = (Split.TRAIN, Split.VAL, Split.TEST)
+        if splits != expected_splits:
+            raise ValueError("requested_ratios must contain train, val, and test in order")
         if not math.isclose(
             sum(item.ratio for item in self.requested_ratios),
             1.0,
@@ -501,10 +515,18 @@ class RepairArtifact(StrictFrozenModel):
             abs_tol=1e-9,
         ):
             raise ValueError("requested split ratios must sum to one")
+        target_splits = tuple(split for split, _ in self.integer_targets)
+        if target_splits != expected_splits:
+            raise ValueError("integer_targets must contain train, val, and test in order")
+        if sum(count for _, count in self.integer_targets) != len(self.assignments):
+            raise ValueError("integer_targets must sum to the assignment count")
+        if self.split_size_weight == 0.0 and self.class_balance_weight == 0.0:
+            raise ValueError("at least one repair objective weight must be positive")
         assignment_ids = tuple(item.record_id for item in self.assignments)
         if assignment_ids != tuple(sorted(set(assignment_ids))):
             raise ValueError("assignments must have unique record IDs in canonical order")
         _validate_sorted_unique(self.excluded_invalid_ids, "excluded_invalid_ids")
+        _validate_sorted_unique(self.infeasibility_warnings, "infeasibility_warnings")
         return self
 
 
