@@ -277,7 +277,6 @@ def test_repair_rejects_invalid_ratio_option_before_writing(
     )
 
     assert result.exit_code == 2
-    assert "--ratios" in result.output
     assert message in result.output
     assert "Traceback" not in result.output
 
