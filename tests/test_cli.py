@@ -14,10 +14,18 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 import splitguard.cli as cli_module
+from splitguard.benchmark import load_benchmark_config
 from splitguard.cli import app
 from splitguard.config import load_config
 from splitguard.repair import MaterializationResult
-from splitguard.schemas import AuditArtifact, RepairArtifact, Split, canonical_sha256
+from splitguard.schemas import (
+    AuditArtifact,
+    DetectionBenchmarkArtifact,
+    RepairArtifact,
+    ScalingBenchmarkArtifact,
+    Split,
+    canonical_sha256,
+)
 
 runner = CliRunner()
 
@@ -27,6 +35,8 @@ def test_root_help_is_useful() -> None:
 
     assert result.exit_code == 0
     assert "Audit and repair image dataset split leakage" in result.stdout
+    assert "benchmark-detection" in result.stdout
+    assert "benchmark-scale" in result.stdout
     assert "version" in result.stdout
     assert "repair" in result.stdout
     assert "materialize" in result.stdout
@@ -37,6 +47,189 @@ def test_version_supports_short_output() -> None:
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "0.1.0"
+
+
+def _write_small_benchmark_config(path: Path) -> Path:
+    path.write_text(
+        """\
+seed: 17
+detection:
+  phash_thresholds: [0, 4]
+  cosine_thresholds: [0.99, 0.80]
+  combined_phash_threshold: 4
+  combined_cosine_threshold: 0.90
+  embedding_only_is_duplicate: false
+  embedding_backend: fake
+  embedding_model: fake:sha256-expand-v1
+  embedding_revision: null
+  embedding_device: cpu
+  embedding_batch_size: 4
+  source_count: 4
+scaling:
+  dataset_sizes: [8]
+  brute_force_max_size: 8
+  phash_radius: 4
+  embedding_source: pixel_derived_fake_embeddings_not_dinov2
+  embedding_dimension: 8
+  k: 2
+  threads: 1
+  hnsw_m: 4
+  hnsw_ef_construction: 8
+  hnsw_ef_search: 4
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_benchmark_commands_have_useful_help() -> None:
+    for command, purpose in (
+        ("benchmark-detection", "precision, recall, and F1"),
+        ("benchmark-scale", "synthetic neighbor scaling"),
+    ):
+        result = runner.invoke(app, [command, "--help"])
+
+        assert result.exit_code == 0
+        assert purpose in result.stdout
+        assert "--config" in result.stdout
+        assert "--output" in result.stdout
+
+
+def test_benchmark_detection_runs_offline_fake_backend_and_serializes(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_small_benchmark_config(tmp_path / "benchmark.yaml")
+    output = tmp_path / "private-results" / "detection.json"
+    config = load_benchmark_config(config_path)
+    expected_config_hash = canonical_sha256(config.model_dump(mode="json"))
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark-detection",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    artifact = DetectionBenchmarkArtifact.model_validate_json(output.read_bytes())
+    assert artifact.metadata.configuration_sha256 == expected_config_hash
+    assert artifact.metadata.random_seeds == (17,)
+    assert artifact.metadata.git_commit_sha is not None
+    assert artifact.embedding_provenance.backend == "fake"
+    assert artifact.embedding_provenance.is_synthetic is True
+    assert artifact.rows
+    embedding_rows = [
+        row
+        for row in artifact.rows
+        if row.detector.startswith("synthetic_fake_embedding")
+    ]
+    assert embedding_rows
+    assert all("synthetic_fake" in row.detector for row in embedding_rows)
+
+    success = json.loads(result.stdout)
+    assert success["artifact"] == output.name
+    assert success["configuration_sha256"] == expected_config_hash
+    assert success["dataset_manifest_sha256"] == artifact.metadata.dataset_manifest_sha256
+    assert success["embedding_backend"] == "fake"
+    assert success["embedding_is_synthetic"] is True
+    assert success["metric_rows"] == len(artifact.rows)
+    assert success["observations"] > 0
+    assert success["seed"] == 17
+    assert success["source_count"] == 4
+    assert str(tmp_path) not in result.stdout
+    assert str(tmp_path) not in output.read_text(encoding="utf-8")
+    assert not tuple(output.parent.glob("*.tmp"))
+
+
+def test_benchmark_scale_runs_small_n_and_labels_synthetic_vectors(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_small_benchmark_config(tmp_path / "benchmark.yaml")
+    output = tmp_path / "private-results" / "scaling.json"
+    config = load_benchmark_config(config_path)
+    expected_config_hash = canonical_sha256(config.model_dump(mode="json"))
+    expected_fixture_hash = canonical_sha256(
+        {
+            "dataset_sizes": [8],
+            "embedding_dimension": 8,
+            "embedding_source": "pixel_derived_fake_embeddings_not_dinov2",
+            "fixture_schema": "splitguard-scaling-fixtures-v1",
+            "local_image_generator": "deterministic_generated_png_files-v1",
+            "seed": 17,
+        }
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark-scale",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    artifact = ScalingBenchmarkArtifact.model_validate_json(output.read_bytes())
+    assert artifact.metadata.configuration_sha256 == expected_config_hash
+    assert artifact.metadata.dataset_manifest_sha256 == expected_fixture_hash
+    assert artifact.metadata.random_seeds == (17,)
+    assert artifact.metadata.git_commit_sha is not None
+    assert artifact.rows
+    assert {row.dataset_size for row in artifact.rows} == {8}
+    assert any(row.stage == "local_image_generation" for row in artifact.rows)
+    assert any(
+        row.mode == "pixel_derived_fake_embeddings_not_dinov2"
+        for row in artifact.rows
+    )
+    assert any(row.recall_at_k is not None for row in artifact.rows)
+
+    success = json.loads(result.stdout)
+    assert success["artifact"] == output.name
+    assert success["configuration_sha256"] == expected_config_hash
+    assert success["dataset_manifest_sha256"] == expected_fixture_hash
+    assert success["dataset_sizes"] == [8]
+    assert success["embedding_source"] == "pixel_derived_fake_embeddings_not_dinov2"
+    assert success["metric_rows"] == len(artifact.rows)
+    assert success["seed"] == 17
+    assert str(tmp_path) not in result.stdout
+    assert str(tmp_path) not in output.read_text(encoding="utf-8")
+    assert not tuple(output.parent.glob("*.tmp"))
+
+
+def test_benchmark_config_errors_are_private_and_leave_no_partial_output(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "private" / "invalid.yaml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        f"unknown_private_path: {tmp_path.as_posix()}\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "results" / "detection.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark-detection",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "benchmark failed strict local" in result.output
+    assert "validation" in result.output
+    assert "Traceback" not in result.output
+    assert str(tmp_path) not in result.output
+    assert not output.exists()
 
 
 def test_scan_reports_exact_duplicates_and_invalid_images(tmp_path: Path) -> None:

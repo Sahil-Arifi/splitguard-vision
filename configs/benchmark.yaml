@@ -1,0 +1,28 @@
+seed: 20260903
+
+detection:
+  phash_thresholds: [0, 2, 4, 6, 8, 12]
+  cosine_thresholds: [0.99, 0.97, 0.95, 0.90, 0.80]
+  combined_phash_threshold: 8
+  combined_cosine_threshold: 0.95
+  embedding_only_is_duplicate: false
+  embedding_backend: dinov2
+  embedding_model: facebook/dinov2-small
+  embedding_revision: ed25f3a31f01632728cabb09d1542f84ab7b0056
+  embedding_device: auto
+  embedding_batch_size: 32
+  source_count: 16
+
+scaling:
+  dataset_sizes: [1000, 5000, 10000]
+  brute_force_max_size: 1000
+  phash_radius: 8
+  # Scale retrieval uses measured, pixel-derived FakeEmbedder vectors only.
+  # They are not DINOv2 embeddings and must not be reported as model quality.
+  embedding_source: pixel_derived_fake_embeddings_not_dinov2
+  embedding_dimension: 64
+  k: 10
+  threads: 1
+  hnsw_m: 32
+  hnsw_ef_construction: 200
+  hnsw_ef_search: 64

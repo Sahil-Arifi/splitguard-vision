@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SCHEMA_VERSION: Literal["1.0"] = "1.0"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
+_IMMUTABLE_REVISION_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _NAMESPACE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _STABLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}_[0-9a-f]{16,64}$")
 
@@ -592,11 +593,74 @@ class DetectionMetricRow(StrictFrozenModel):
     metrics: BinaryMetrics
 
 
+class EmbeddingProvenance(StrictFrozenModel):
+    """Serializable identity for the embedder that produced benchmark evidence."""
+
+    backend: Literal["fake", "dinov2", "custom"]
+    model_identity: Annotated[str, Field(min_length=1, max_length=1000)]
+    model_revision: Annotated[str, Field(min_length=1, max_length=64)] | None = None
+    preprocessing_version: Annotated[str, Field(min_length=1, max_length=256)]
+    device: Literal["cpu", "cuda"]
+    is_synthetic: bool
+
+    @model_validator(mode="after")
+    def backend_claims_are_consistent(self) -> Self:
+        if self.backend == "fake":
+            if not self.is_synthetic or not self.model_identity.startswith("fake:"):
+                raise ValueError("fake provenance must be explicitly synthetic and fake-labeled")
+            if self.model_revision is not None:
+                raise ValueError("fake provenance cannot claim a model revision")
+            if self.device != "cpu":
+                raise ValueError("fake provenance must use the CPU device")
+        elif self.backend == "dinov2":
+            if self.is_synthetic:
+                raise ValueError("DINOv2 provenance cannot be labeled synthetic")
+            if self.model_revision is None or _IMMUTABLE_REVISION_RE.fullmatch(
+                self.model_revision
+            ) is None:
+                raise ValueError("DINOv2 provenance requires an immutable revision")
+            if not self.model_identity.startswith("huggingface:") or (
+                f"@{self.model_revision}" not in self.model_identity
+            ):
+                raise ValueError("DINOv2 model identity must contain its pinned revision")
+        return self
+
+    @property
+    def detector_name(self) -> str:
+        """Return a compact detector label without obscuring fake versus DINOv2."""
+
+        if self.backend == "fake":
+            return "synthetic_fake_embedding_cosine_not_dinov2"
+        if self.backend == "dinov2":
+            if self.model_revision is None:  # pragma: no cover - validated above
+                raise AssertionError("validated DINOv2 revision is missing")
+            return f"dinov2_embedding_cosine@{self.model_revision[:12]}"
+        digest = hashlib.sha256(self.model_identity.encode()).hexdigest()[:12]
+        return f"custom_embedding_cosine@{digest}"
+
+
 class DetectionBenchmarkArtifact(StrictFrozenModel):
     artifact_type: Literal["detection_benchmark"] = "detection_benchmark"
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     metadata: RunMetadata
+    embedding_provenance: EmbeddingProvenance
     rows: tuple[DetectionMetricRow, ...]
+
+    @model_validator(mode="after")
+    def embedding_detectors_match_provenance(self) -> Self:
+        expected = self.embedding_provenance.detector_name
+        for row in self.rows:
+            backend_specific = row.detector.startswith(
+                (
+                    "synthetic_fake_embedding",
+                    "dinov2_embedding",
+                    "custom_embedding",
+                    "combined_exact_phash_plus_",
+                )
+            )
+            if backend_specific and expected not in row.detector:
+                raise ValueError("embedding detector labels must match artifact provenance")
+        return self
 
 
 class ScalingMetricRow(StrictFrozenModel):
@@ -605,7 +669,14 @@ class ScalingMetricRow(StrictFrozenModel):
     mode: Annotated[str, Field(min_length=1, max_length=128)]
     duration_seconds: NonNegativeFloat
     peak_memory_bytes: NonNegativeInt | None = None
+    memory_measurement_scope: Literal["python_allocations_via_tracemalloc"] | None = None
     recall_at_k: UnitFloat | None = None
+
+    @model_validator(mode="after")
+    def memory_value_and_scope_are_paired(self) -> Self:
+        if (self.peak_memory_bytes is None) != (self.memory_measurement_scope is None):
+            raise ValueError("peak_memory_bytes and memory_measurement_scope must be set together")
+        return self
 
 
 class ScalingBenchmarkArtifact(StrictFrozenModel):
@@ -685,6 +756,7 @@ __all__ = [
     "DuplicateEvidence",
     "DuplicateFamily",
     "EdgeDecision",
+    "EmbeddingProvenance",
     "ImageRecord",
     "LabelConflict",
     "LeakageGroup",
@@ -697,6 +769,7 @@ __all__ = [
     "RunMetadata",
     "ScalingBenchmarkArtifact",
     "ScalingMetricRow",
+    "Sha256",
     "Split",
     "SplitBoundary",
     "SplitRatio",

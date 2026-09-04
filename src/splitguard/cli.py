@@ -11,6 +11,15 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from splitguard import __version__
+from splitguard.benchmark import (
+    BenchmarkConfig,
+    BenchmarkInputError,
+    build_detection_artifact,
+    build_scaling_artifact,
+    load_benchmark_config,
+    run_detection_benchmark,
+    run_scaling_benchmarks,
+)
 from splitguard.config import ConfigLoadError, load_config
 from splitguard.conflicts import analyze_conflicts
 from splitguard.embeddings import EmbeddingError, embed_records
@@ -182,6 +191,141 @@ def _same_path(left: Path, right: Path) -> bool:
     """Compare destinations lexically after absolute normalization."""
 
     return left.resolve(strict=False) == right.resolve(strict=False)
+
+
+def _benchmark_configuration_hash(config: BenchmarkConfig) -> str:
+    """Hash the complete validated benchmark configuration canonically."""
+
+    return canonical_sha256(config.model_dump(mode="json"))
+
+
+def _scaling_fixture_hash(config: BenchmarkConfig) -> str:
+    """Identify deterministic generated image/vector inputs, not runtime results."""
+
+    return canonical_sha256(
+        {
+            "dataset_sizes": list(config.scaling.dataset_sizes),
+            "embedding_dimension": config.scaling.embedding_dimension,
+            "embedding_source": config.scaling.embedding_source,
+            "fixture_schema": "splitguard-scaling-fixtures-v1",
+            "local_image_generator": "deterministic_generated_png_files-v1",
+            "seed": config.seed,
+        }
+    )
+
+
+@app.command()
+def benchmark_detection(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", help="Validated detector benchmark YAML configuration."),
+    ] = Path("configs/benchmark.yaml"),
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            help="Destination for canonical raw detector metrics JSON.",
+        ),
+    ] = Path("artifacts/detection_benchmark.json"),
+) -> None:
+    """Measure detector precision, recall, and F1 on controlled corruptions."""
+
+    try:
+        config = load_benchmark_config(config_path)
+        configuration_sha256 = _benchmark_configuration_hash(config)
+        benchmark_run = run_detection_benchmark(config)
+        metadata = collect_run_metadata(
+            configuration_sha256,
+            benchmark_run.dataset_sha256,
+            (config.seed,),
+            repo_root=Path(__file__).parents[2],
+        )
+        artifact = build_detection_artifact(
+            metadata,
+            benchmark_run.rows,
+            embedding_provenance=benchmark_run.embedding_provenance,
+        )
+        _write_json_artifact(output, artifact)
+    except BenchmarkInputError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--config") from exc
+    except (ImportError, OSError, RuntimeError, TypeError, ValidationError, ValueError) as exc:
+        raise typer.BadParameter(
+            "detector benchmark failed strict local validation",
+            param_hint="--config",
+        ) from exc
+
+    typer.echo(
+        json.dumps(
+            {
+                "artifact": output.name,
+                "configuration_sha256": artifact.metadata.configuration_sha256,
+                "corruption_types": sorted({row.corruption_type for row in artifact.rows}),
+                "dataset_manifest_sha256": artifact.metadata.dataset_manifest_sha256,
+                "embedding_backend": benchmark_run.embedding_provenance.backend,
+                "embedding_is_synthetic": benchmark_run.embedding_provenance.is_synthetic,
+                "metric_rows": len(artifact.rows),
+                "observations": len(benchmark_run.observations),
+                "seed": config.seed,
+                "source_count": len(benchmark_run.source_records),
+            },
+            allow_nan=False,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command()
+def benchmark_scale(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", help="Validated scaling benchmark YAML configuration."),
+    ] = Path("configs/benchmark.yaml"),
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            help="Destination for canonical raw scaling metrics JSON.",
+        ),
+    ] = Path("artifacts/scaling_benchmark.json"),
+) -> None:
+    """Measure local audit stages and explicitly synthetic neighbor scaling."""
+
+    try:
+        config = load_benchmark_config(config_path)
+        configuration_sha256 = _benchmark_configuration_hash(config)
+        dataset_sha256 = _scaling_fixture_hash(config)
+        rows = run_scaling_benchmarks(config)
+        metadata = collect_run_metadata(
+            configuration_sha256,
+            dataset_sha256,
+            (config.seed,),
+            repo_root=Path(__file__).parents[2],
+        )
+        artifact = build_scaling_artifact(metadata, rows)
+        _write_json_artifact(output, artifact)
+    except BenchmarkInputError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--config") from exc
+    except (ImportError, OSError, RuntimeError, TypeError, ValidationError, ValueError) as exc:
+        raise typer.BadParameter(
+            "scaling benchmark failed strict local validation",
+            param_hint="--config",
+        ) from exc
+
+    typer.echo(
+        json.dumps(
+            {
+                "artifact": output.name,
+                "configuration_sha256": artifact.metadata.configuration_sha256,
+                "dataset_manifest_sha256": artifact.metadata.dataset_manifest_sha256,
+                "dataset_sizes": config.scaling.dataset_sizes,
+                "embedding_source": config.scaling.embedding_source,
+                "metric_rows": len(artifact.rows),
+                "seed": config.seed,
+            },
+            allow_nan=False,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command()
