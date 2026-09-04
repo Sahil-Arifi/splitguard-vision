@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -386,6 +387,7 @@ def test_dinov2_loader_uses_safe_options_eval_and_inference_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: dict[str, Any] = {}
+    monkeypatch.delenv("HF_HUB_DISABLE_TELEMETRY", raising=False)
 
     class FakeProcessor:
         def __call__(
@@ -431,6 +433,9 @@ def test_dinov2_loader_uses_safe_options_eval_and_inference_mode(
 
     def import_fake_transformers(name: str) -> SimpleNamespace:
         assert name == "transformers"
+        calls["telemetry_disabled_before_import"] = os.environ.get(
+            "HF_HUB_DISABLE_TELEMETRY"
+        )
         return fake_transformers
 
     monkeypatch.setattr(importlib, "import_module", import_fake_transformers)
@@ -458,6 +463,7 @@ def test_dinov2_loader_uses_safe_options_eval_and_inference_mode(
     assert calls["device"] == "cpu"
     assert calls["eval"] is True
     assert calls["inference_mode"] is True
+    assert calls["telemetry_disabled_before_import"] == "1"
     assert calls["processor_loads"] == 1
     assert calls["model_loads"] == 1
     assert vectors.dtype == np.float32

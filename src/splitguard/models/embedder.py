@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
 import re
 import threading
 from collections.abc import Mapping, Sequence
@@ -199,6 +200,10 @@ class DinoV2Embedder:
             return self._processor, self._model
         with self._load_lock:
             if self._processor is None or self._model is None:
+                # Hugging Face model files may be fetched on first use, but library
+                # telemetry is disabled before its modules are imported. Image bytes
+                # are never passed to the model-loading client.
+                os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
                 transformers = importlib.import_module("transformers")
                 processor = transformers.AutoImageProcessor.from_pretrained(
                     self._model_name,
