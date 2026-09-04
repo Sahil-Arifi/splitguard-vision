@@ -784,13 +784,14 @@ def build_detection_artifact(
 
 def _safe_relative_file(root: Path, relative_path: str) -> Path:
     parts = PurePosixPath(relative_path).parts
-    candidate = root.joinpath(*parts)
     try:
+        resolved_root = root.resolve(strict=True)
+        candidate = resolved_root.joinpath(*parts)
         resolved = candidate.resolve(strict=True)
     except OSError as exc:
         raise BenchmarkInputError("a synthetic benchmark image is unavailable") from exc
     try:
-        resolved.relative_to(root)
+        resolved.relative_to(resolved_root)
     except ValueError as exc:
         raise BenchmarkInputError("a synthetic benchmark path escapes its root") from exc
     if not resolved.is_file():

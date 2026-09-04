@@ -690,6 +690,21 @@ def test_configured_scale_run_and_artifact_are_canonical(
     )
 
 
+def test_safe_relative_file_normalizes_root_before_containment_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    image = dataset / "image.bin"
+    image.write_bytes(b"fixture")
+    monkeypatch.chdir(tmp_path)
+
+    resolved = benchmark_module._safe_relative_file(Path("dataset"), "image.bin")
+
+    assert resolved == image.resolve(strict=True)
+
+
 def test_committed_benchmark_configuration_is_strict_and_explicit() -> None:
     config_path = Path(__file__).parents[1] / "configs" / "benchmark.yaml"
 
