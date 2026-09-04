@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import socket
 from pathlib import Path
 from typing import Literal, Never
 
@@ -21,6 +22,7 @@ from splitguard.benchmark import load_benchmark_config
 from splitguard.cli import app
 from splitguard.config import load_config
 from splitguard.repair import MaterializationResult
+from splitguard.reporting import ReportResult
 from splitguard.schemas import (
     AuditArtifact,
     DetectionBenchmarkArtifact,
@@ -38,17 +40,26 @@ from splitguard.training import run_cifar_experiment as run_cifar_experiment_cor
 runner = CliRunner()
 
 
+def _plain_cli_output(value: str) -> str:
+    """Strip terminal styling/wrapping and normalize rendered Windows paths."""
+
+    return " ".join(unstyle(value).split()).replace("\\", "/")
+
+
 def test_root_help_is_useful() -> None:
     result = runner.invoke(app, ["--help"])
+    output = _plain_cli_output(result.stdout)
 
     assert result.exit_code == 0
-    assert "Audit and repair image dataset split leakage" in result.stdout
-    assert "benchmark-detection" in result.stdout
-    assert "benchmark-scale" in result.stdout
-    assert "experiment" in result.stdout
-    assert "version" in result.stdout
-    assert "repair" in result.stdout
-    assert "materialize" in result.stdout
+    assert "Audit and repair image dataset split leakage" in output
+    assert "benchmark-detection" in output
+    assert "benchmark-scale" in output
+    assert "experiment" in output
+    assert "report" in output
+    assert "demo" in output
+    assert "version" in output
+    assert "repair" in output
+    assert "materialize" in output
 
 
 def test_version_supports_short_output() -> None:
@@ -97,7 +108,7 @@ def test_benchmark_commands_have_useful_help() -> None:
         ("benchmark-scale", "synthetic neighbor scaling"),
     ):
         result = runner.invoke(app, [command, "--help"])
-        output = unstyle(result.stdout)
+        output = _plain_cli_output(result.stdout)
 
         assert result.exit_code == 0
         assert purpose in output
@@ -311,7 +322,7 @@ def _generated_cifar_arrays() -> tuple[
 
 def test_experiment_help_names_config_and_raw_artifact_defaults() -> None:
     result = runner.invoke(app, ["experiment", "--help"])
-    output = unstyle(result.stdout)
+    output = _plain_cli_output(result.stdout)
 
     assert result.exit_code == 0
     assert "matched contaminated and repaired" in output
@@ -444,7 +455,7 @@ def test_experiment_hides_runtime_paths_and_leaves_no_partial_output(
         app,
         ["experiment", "--config", str(config_path), "--output", str(output)],
     )
-    rendered = unstyle(result.output)
+    rendered = _plain_cli_output(result.output)
 
     assert result.exit_code == 2
     assert "experiment failed" in rendered
@@ -453,6 +464,297 @@ def test_experiment_hides_runtime_paths_and_leaves_no_partial_output(
     assert "Traceback" not in rendered
     assert str(tmp_path) not in rendered
     assert not output.exists()
+
+
+def test_report_help_names_every_optional_artifact_and_privacy_switch() -> None:
+    result = runner.invoke(app, ["report", "--help"])
+    output = _plain_cli_output(result.stdout)
+
+    assert result.exit_code == 0
+    assert "fully local HTML and Markdown" in output
+    for option in (
+        "--audit",
+        "--repair",
+        "--detection-benchmark",
+        "--scaling-benchmark",
+        "--training-results",
+        "--dataset-root",
+        "--output-dir",
+        "--no-thumbnails",
+    ):
+        assert option in output
+    assert "artifacts" in output
+
+
+def test_report_forwards_all_artifacts_and_emits_relative_summary(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    audit_path = tmp_path / "private" / "audit.json"
+    repair_path = tmp_path / "private" / "repair.json"
+    detection_path = tmp_path / "private" / "detection.json"
+    scaling_path = tmp_path / "private" / "scaling.json"
+    training_path = tmp_path / "private" / "training.json"
+    dataset_root = tmp_path / "private" / "images"
+    output_dir = tmp_path / "shareable" / "report-output"
+    calls: list[dict[str, object]] = []
+
+    def fake_generate_report(
+        source_audit: str | Path,
+        destination: str | Path,
+        *,
+        repair_path: str | Path | None = None,
+        detection_benchmark_path: str | Path | None = None,
+        scaling_benchmark_path: str | Path | None = None,
+        training_results_path: str | Path | None = None,
+        dataset_root: str | Path | None = None,
+        no_thumbnails: bool = False,
+        thumbnail_size: int = 160,
+        max_thumbnails: int = 48,
+    ) -> ReportResult:
+        calls.append(
+            {
+                "audit": Path(source_audit),
+                "dataset_root": Path(dataset_root) if dataset_root is not None else None,
+                "detection": (
+                    Path(detection_benchmark_path)
+                    if detection_benchmark_path is not None
+                    else None
+                ),
+                "max_thumbnails": max_thumbnails,
+                "no_thumbnails": no_thumbnails,
+                "output": Path(destination),
+                "repair": Path(repair_path) if repair_path is not None else None,
+                "scaling": (
+                    Path(scaling_benchmark_path)
+                    if scaling_benchmark_path is not None
+                    else None
+                ),
+                "thumbnail_size": thumbnail_size,
+                "training": (
+                    Path(training_results_path)
+                    if training_results_path is not None
+                    else None
+                ),
+            }
+        )
+        published = Path(destination)
+        published.mkdir(parents=True)
+        html_path = published / "report.html"
+        markdown_path = published / "report.md"
+        html_path.write_text("<html></html>\n", encoding="utf-8")
+        markdown_path.write_text("# Report\n", encoding="utf-8")
+        chart_paths = tuple(
+            published / name
+            for name in (
+                "detection_pr_curve.png",
+                "runtime_scaling.png",
+                "split_distribution.png",
+                "evaluation_comparison.png",
+            )
+        )
+        for chart_path in chart_paths:
+            chart_path.write_bytes(b"png")
+        return ReportResult(
+            output_dir=published.resolve(),
+            html_path=html_path.resolve(),
+            markdown_path=markdown_path.resolve(),
+            chart_paths=tuple(path.resolve() for path in chart_paths),
+            thumbnail_paths=(),
+            thumbnails_skipped=5,
+        )
+
+    monkeypatch.setattr(cli_module, "generate_report", fake_generate_report)
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            "--audit",
+            str(audit_path),
+            "--repair",
+            str(repair_path),
+            "--detection-benchmark",
+            str(detection_path),
+            "--scaling-benchmark",
+            str(scaling_path),
+            "--training-results",
+            str(training_path),
+            "--dataset-root",
+            str(dataset_root),
+            "--output-dir",
+            str(output_dir),
+            "--no-thumbnails",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "audit": audit_path,
+            "dataset_root": dataset_root,
+            "detection": detection_path,
+            "max_thumbnails": 48,
+            "no_thumbnails": True,
+            "output": output_dir,
+            "repair": repair_path,
+            "scaling": scaling_path,
+            "thumbnail_size": 160,
+            "training": training_path,
+        }
+    ]
+    summary = json.loads(result.stdout)
+    assert summary == {
+        "charts": [
+            "detection_pr_curve.png",
+            "runtime_scaling.png",
+            "split_distribution.png",
+            "evaluation_comparison.png",
+        ],
+        "html": "report.html",
+        "markdown": "report.md",
+        "output": output_dir.name,
+        "thumbnail_count": 0,
+        "thumbnails_enabled": False,
+        "thumbnails_skipped": 5,
+    }
+    assert str(tmp_path) not in result.stdout
+
+
+def test_report_hides_unexpected_runtime_paths_and_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "shareable" / "report"
+
+    def fail_with_private_path(*_args: object, **_kwargs: object) -> Never:
+        raise OSError(f"failed while reading {tmp_path}")
+
+    monkeypatch.setattr(cli_module, "generate_report", fail_with_private_path)
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            "--audit",
+            str(tmp_path / "private" / "audit.json"),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    rendered = _plain_cli_output(result.output)
+
+    assert result.exit_code == 2
+    assert "report generation failed" in rendered
+    assert "no report was" in rendered
+    assert "published" in rendered
+    assert "Traceback" not in rendered
+    assert str(tmp_path) not in rendered
+    assert not output_dir.exists()
+
+
+def test_report_missing_audit_error_is_private_and_creates_no_directory(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "shareable" / "report"
+    result = runner.invoke(
+        app,
+        [
+            "report",
+            "--audit",
+            str(tmp_path / "private" / "missing-audit.json"),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    rendered = _plain_cli_output(result.output)
+
+    assert result.exit_code == 2
+    assert "could not read the audit artifact" in rendered
+    assert "Traceback" not in rendered
+    assert str(tmp_path) not in rendered
+    assert not output_dir.exists()
+
+
+def test_demo_help_documents_safe_destinations_and_deterministic_seed() -> None:
+    result = runner.invoke(app, ["demo", "--help"])
+    output = _plain_cli_output(result.stdout)
+
+    assert result.exit_code == 0
+    assert "deterministic offline demo" in output
+    assert "--workspace" in output
+    assert "demo-data" in output
+    assert "--output-dir" in output
+    assert "artifacts/demo" in output
+    assert "--seed" in output
+    assert "20260903" in output
+
+
+def test_demo_defaults_run_full_workflow_without_network(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def deny_network(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("the CLI demo attempted to use the network")
+
+    monkeypatch.setattr(socket, "socket", deny_network)
+    monkeypatch.setattr(socket, "create_connection", deny_network)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["demo", "--seed", "71"])
+
+    assert result.exit_code == 0, result.output
+    workspace = tmp_path / "demo-data"
+    output_dir = tmp_path / "artifacts" / "demo"
+    summary = json.loads(result.stdout)
+    assert summary["workspace"] == "demo-data"
+    assert summary["artifacts"] == "demo"
+    assert summary["seed"] == 71
+    assert summary["valid_images"] == 5
+    assert summary["invalid_images"] == 1
+    assert summary["leakage_groups"] == 1
+    assert summary["cross_label_conflicts"] == 1
+    assert summary["source_bytes_unchanged"] is True
+    assert summary["dataset"] == "dataset"
+    assert len(summary["dataset_sha256"]) == 64
+    assert (workspace / summary["dataset"]).is_dir()
+    assert (output_dir / summary["audit"]).is_file()
+    assert (output_dir / summary["repair"]).is_file()
+    assert (output_dir / summary["repaired_manifest"]).is_file()
+    assert (output_dir / summary["report_html"]).is_file()
+    assert (output_dir / summary["report_markdown"]).is_file()
+    assert all((output_dir / path).is_file() for path in summary["charts"])
+    assert str(tmp_path) not in result.stdout
+
+
+def test_demo_hides_unexpected_runtime_paths_and_leaves_no_outputs(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "private" / "demo-data"
+    output_dir = tmp_path / "private" / "artifacts"
+
+    def fail_with_private_path(*_args: object, **_kwargs: object) -> Never:
+        raise OSError(f"failed while publishing {tmp_path}")
+
+    monkeypatch.setattr(cli_module, "run_offline_demo", fail_with_private_path)
+    result = runner.invoke(
+        app,
+        [
+            "demo",
+            "--workspace",
+            str(workspace),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    rendered = _plain_cli_output(result.output)
+
+    assert result.exit_code == 2
+    assert "offline demo failed before" in rendered
+    assert "verified publication" in rendered
+    assert "Traceback" not in rendered
+    assert str(tmp_path) not in rendered
+    assert not workspace.exists()
+    assert not output_dir.exists()
 
 
 def test_scan_reports_exact_duplicates_and_invalid_images(tmp_path: Path) -> None:

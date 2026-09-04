@@ -22,6 +22,7 @@ from splitguard.benchmark import (
 )
 from splitguard.config import ConfigLoadError, load_config
 from splitguard.conflicts import analyze_conflicts
+from splitguard.demo import DemoInputError, DemoRunError, run_offline_demo
 from splitguard.embeddings import EmbeddingError, embed_records
 from splitguard.graph import GraphInputError, build_evidence_graph
 from splitguard.hashing import (
@@ -42,6 +43,7 @@ from splitguard.repair import (
     repair_splits,
     write_repaired_manifest,
 )
+from splitguard.reporting import ReportInputError, generate_report
 from splitguard.schemas import (
     AuditArtifact,
     AuditSummary,
@@ -401,6 +403,164 @@ def experiment(
                 "resolved_device": artifact.summary.resolved_device,
                 "run_count": len(artifact.runs),
                 "seeds": artifact.metadata.random_seeds,
+            },
+            allow_nan=False,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command()
+def report(
+    audit_path: Annotated[
+        Path,
+        typer.Option("--audit", help="Validated SplitGuard audit JSON artifact."),
+    ],
+    repair_path: Annotated[
+        Path | None,
+        typer.Option("--repair", help="Optional validated repair JSON artifact."),
+    ] = None,
+    detection_benchmark_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--detection-benchmark",
+            help="Optional detector benchmark JSON artifact.",
+        ),
+    ] = None,
+    scaling_benchmark_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--scaling-benchmark",
+            help="Optional scaling benchmark JSON artifact.",
+        ),
+    ] = None,
+    training_results_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--training-results",
+            help="Optional CIFAR training-results JSON artifact.",
+        ),
+    ] = None,
+    dataset_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--dataset-root",
+            help="Explicit source root used only to build local thumbnails.",
+        ),
+    ] = None,
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            help="Directory for local HTML, Markdown, charts, and thumbnails.",
+        ),
+    ] = Path("artifacts"),
+    no_thumbnails: Annotated[
+        bool,
+        typer.Option(
+            "--no-thumbnails",
+            help="Do not read or copy source images into report thumbnails.",
+        ),
+    ] = False,
+) -> None:
+    """Generate fully local HTML and Markdown reports from raw artifacts."""
+
+    try:
+        result = generate_report(
+            audit_path,
+            output_dir,
+            repair_path=repair_path,
+            detection_benchmark_path=detection_benchmark_path,
+            scaling_benchmark_path=scaling_benchmark_path,
+            training_results_path=training_results_path,
+            dataset_root=dataset_root,
+            no_thumbnails=no_thumbnails,
+        )
+    except ReportInputError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--audit") from exc
+    except (OSError, RuntimeError, TypeError, ValidationError, ValueError) as exc:
+        raise typer.BadParameter(
+            "report generation failed; no report was published",
+            param_hint="--audit",
+        ) from exc
+
+    typer.echo(
+        json.dumps(
+            {
+                "charts": [path.name for path in result.chart_paths],
+                "html": result.html_path.name,
+                "markdown": result.markdown_path.name,
+                "output": result.output_dir.name,
+                "thumbnail_count": len(result.thumbnail_paths),
+                "thumbnails_enabled": not no_thumbnails,
+                "thumbnails_skipped": result.thumbnails_skipped,
+            },
+            allow_nan=False,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command()
+def demo(
+    workspace: Annotated[
+        Path,
+        typer.Option(
+            "--workspace",
+            help="New workspace for generated demo images and local cache.",
+        ),
+    ] = Path("demo-data"),
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            help="New destination for demo audit, repair, and report artifacts.",
+        ),
+    ] = Path("artifacts/demo"),
+    seed: Annotated[
+        int,
+        typer.Option(
+            "--seed",
+            min=0,
+            max=2**32 - 1,
+            help="Unsigned 32-bit seed for the deterministic generated fixture.",
+        ),
+    ] = 20260903,
+) -> None:
+    """Generate, audit, repair, and report a deterministic offline demo."""
+
+    try:
+        result = run_offline_demo(workspace, output_dir, seed=seed)
+    except (DemoInputError, DemoRunError) as exc:
+        raise typer.BadParameter(
+            str(exc),
+            param_hint="--workspace/--output-dir",
+        ) from exc
+    except (OSError, RuntimeError, TypeError, ValidationError, ValueError) as exc:
+        raise typer.BadParameter(
+            "offline demo failed before verified publication",
+            param_hint="--workspace/--output-dir",
+        ) from exc
+
+    typer.echo(
+        json.dumps(
+            {
+                "artifacts": output_dir.name,
+                "audit": result.audit_path,
+                "charts": result.chart_paths,
+                "cross_label_conflicts": result.cross_label_conflict_count,
+                "dataset": result.dataset_path,
+                "dataset_sha256": result.dataset_sha256,
+                "invalid_images": result.invalid_image_count,
+                "leakage_groups": result.leakage_group_count,
+                "repair": result.repair_path,
+                "repaired_manifest": result.repaired_manifest_path,
+                "report_html": result.report_html_path,
+                "report_markdown": result.report_markdown_path,
+                "seed": result.seed,
+                "source_bytes_unchanged": result.source_bytes_unchanged,
+                "valid_images": result.valid_image_count,
+                "workspace": workspace.name,
             },
             allow_nan=False,
             sort_keys=True,
