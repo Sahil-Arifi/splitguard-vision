@@ -554,6 +554,7 @@ def test_generate_full_local_report_from_validated_raw_artifacts(tmp_path: Path)
 
     html = result.html_path.read_text(encoding="utf-8")
     markdown = result.markdown_path.read_text(encoding="utf-8")
+    assert all(line.rstrip() == line for line in markdown.splitlines())
     expected_sections = (
         "Summary",
         "Split statistics",

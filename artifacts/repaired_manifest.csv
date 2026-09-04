@@ -1,0 +1,6 @@
+path,split,label
+test/cat/exact-duplicate.png,train,cat
+test/cat/jpeg-recompressed.jpg,train,cat
+train/cat/source.png,train,cat
+val/cat/resized.png,train,cat
+val/dog/conflicting-label.png,train,dog

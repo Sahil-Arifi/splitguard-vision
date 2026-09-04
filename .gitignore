@@ -30,6 +30,21 @@ cifar-10-batches-py/
 **/embedding-cache/
 artifacts/*
 !artifacts/.gitkeep
+!artifacts/audit.json
+!artifacts/repaired_manifest.csv
+!artifacts/repair.json
+!artifacts/detection_benchmark.json
+!artifacts/scaling_benchmark.json
+!artifacts/training_results.json
+!artifacts/report.html
+!artifacts/report.md
+!artifacts/detection_pr_curve.png
+!artifacts/runtime_scaling.png
+!artifacts/split_distribution.png
+!artifacts/evaluation_comparison.png
+!artifacts/report_thumbnails/
+artifacts/report_thumbnails/*
+!artifacts/report_thumbnails/*.png
 
 # Editors and operating systems
 .idea/

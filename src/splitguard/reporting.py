@@ -1051,7 +1051,7 @@ def _render_markdown(
 
     thumbnail_lines = [f"{thumbnail_status}\n"]
     thumbnail_lines.extend(
-        f"![{_markdown_text(item.record_id)}]({item.asset_path})  \n"
+        f"![{_markdown_text(item.record_id)}]({item.asset_path})\n\n"
         f"`{_markdown_text(item.record_id)}` · {_markdown_text(item.split)} · "
         f"{_markdown_text(item.label)} · `{_markdown_text(item.path)}`"
         for item in thumbnails
