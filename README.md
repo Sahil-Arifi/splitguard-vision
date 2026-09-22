@@ -236,6 +236,13 @@ thumbnails. Use `--no-thumbnails` for sensitive datasets.
 
 ## Reproduce
 
+For your own independently labeled corpus, the
+[`evaluate-labeled-pairs` workflow](docs/labeled-pair-evaluation.md) selects a
+SHA/pHash threshold on calibration pairs and measures that frozen threshold on
+held-out pairs. It rejects shared source groups, paths, and identical content
+between folds. No external-corpus results are claimed; the published measurements
+remain controlled fixtures and the small CIFAR-10 experiment described above.
+
 Prerequisites are Python 3.11+ and
 [`uv`](https://docs.astral.sh/uv/). The lockfile pins a Windows/Linux CPU environment;
 the first sync downloads packages.
@@ -339,6 +346,7 @@ workflow that fetches CIFAR-10, and neither is run in CI.
 | `repair AUDIT_JSON --ratios ...` | Optimize group-aware assignments and write a new manifest |
 | `materialize MANIFEST OUTPUT_DIR` | Explicitly copy or symlink a separate repaired tree |
 | `benchmark-detection` | Inject controlled defects and score each detector layer |
+| `evaluate-labeled-pairs` | Calibrate SHA/pHash on independent external labels and score a held-out fold |
 | `benchmark-scale` | Measure local pipeline and exact/approximate indexes |
 | `experiment` | Run matched contaminated/repaired CIFAR-10 training |
 | `report --audit ...` | Generate local HTML, Markdown, charts, and optional thumbnails |
@@ -442,7 +450,9 @@ head-to-head product benchmark was run, so the repository makes no quality ranki
 Build a larger, domain-diverse, human-labeled pair benchmark and calibrate the
 definite/review policy against it. That would test crop robustness, quantify false
 positives on naturally similar non-duplicates, and turn the controlled thresholds
-into defensible deployment guidance. Follow with larger repeated training experiments
+into defensible deployment guidance. The [external-pair evaluation path](docs/labeled-pair-evaluation.md)
+is implemented; collecting and independently labeling that corpus is still outstanding.
+Follow with larger repeated training experiments
 covering multiple corruption families and a separately pinned CUDA environment.
 
 ## License
