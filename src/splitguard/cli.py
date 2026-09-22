@@ -31,6 +31,7 @@ from splitguard.hashing import (
     group_exact_duplicates,
     indexed_phash_pairs,
 )
+from splitguard.labeled_pairs import LabeledPairError, evaluate_labeled_pairs
 from splitguard.leakage import analyze_leakage
 from splitguard.manifest import ManifestError, load_manifest
 from splitguard.metrics import collect_run_metadata, manifest_snapshot_hash
@@ -219,6 +220,47 @@ def _scaling_fixture_hash(config: BenchmarkConfig) -> str:
             "seed": config.seed,
         }
     )
+
+
+@app.command("evaluate-labeled-pairs")
+def evaluate_pairs(
+    calibration_csv: Annotated[Path, typer.Argument(help="Independent calibration-pair CSV.")],
+    evaluation_csv: Annotated[Path, typer.Argument(help="Held-out evaluation-pair CSV.")],
+    dataset_root: Annotated[Path, typer.Option(help="Root containing pair images.")],
+    label_source: Annotated[
+        str, typer.Option(help="Who labeled the pairs, using which independent review protocol.")
+    ],
+    output: Annotated[
+        Path, typer.Option(help="JSON output outside the image dataset root.")
+    ] = Path("artifacts/labeled_pair_evaluation.json"),
+    minimum_precision: Annotated[
+        float, typer.Option(help="Minimum empirical calibration precision.", min=0.0, max=1.0)
+    ] = 0.95,
+) -> None:
+    """Calibrate SHA/pHash on external labels, then measure one frozen held-out threshold."""
+    try:
+        if output.resolve().is_relative_to(dataset_root.resolve()) or any(
+            _same_path(output, source) for source in (calibration_csv, evaluation_csv)
+        ):
+            raise LabeledPairError(
+                "output must be outside the image root and differ from both CSVs"
+            )
+        artifact = evaluate_labeled_pairs(
+            calibration_csv, evaluation_csv, dataset_root,
+            label_source=label_source, minimum_precision=minimum_precision,
+            repo_root=Path(__file__).parents[2],
+        )
+        _write_json_artifact(output, artifact)
+    except LabeledPairError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except (OSError, ValidationError, ValueError) as exc:
+        raise typer.BadParameter("labeled-pair evaluation failed local validation") from exc
+    typer.echo(json.dumps({
+        "artifact": output.name,
+        "selected_radius": artifact.selected_radius,
+        "calibration": artifact.calibration.model_dump(mode="json"),
+        "evaluation": artifact.evaluation.model_dump(mode="json"),
+    }, allow_nan=False, sort_keys=True))
 
 
 @app.command()
